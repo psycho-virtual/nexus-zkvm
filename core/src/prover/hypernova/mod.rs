@@ -65,6 +65,12 @@ pub fn prove_seq(pp: &PP, trace: Trace) -> Result<IVCProof, ProofError> {
         proof = prove_seq_step(Some(proof), pp, &tr)?;
     }
 
+    tracing::debug!(
+        target: LOG_TARGET,
+        step_num = %proof.step_num(),
+        "Proof generation completed"
+    );
+
     Ok(proof)
 }
 

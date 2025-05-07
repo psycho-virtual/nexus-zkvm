@@ -74,13 +74,16 @@ where
         // it is important we absorb this **before** squeezing from the random oracle within the HyperNova subprotocol
         random_oracle.absorb_non_native(&U_secondary);
 
+        let t0 = std::time::Instant::now();
         let (hypernova_proof, (folded_U, folded_W), rho) =
             HNProof::prove_as_subprotocol(&mut random_oracle, vk, shape, (U, W), (u, w))?;
+        tracing::debug!(
+            target: "hypernova::nimfs",
+            operation = "Running the prover for HyperNova",
+            elapsed  = ?t0.elapsed()
+        );
 
-        // The PolyCommitment trait only guarantees the commitment can be represented by a vector of field elements. However,
-        // it makes sense to implement HyperNova Cyclefold assuming the commitment is just a single field element, because we
-        // will be using such a scheme for now (Zeromorph) and it leads to a minimally-sized secondary circuit. We expect for
-        // these .unwrap() calls to panic with any attempt to use an incompatible poly commitment scheme.
+        let t_sec = std::time::Instant::now();
         let W_comm_trace = secondary::synthesize::<G1, G2, C2>(
             secondary::Circuit {
                 g1: U
@@ -105,10 +108,17 @@ where
             },
             pp_secondary,
         )?;
+        tracing::debug!(
+            target: "hypernova::nimfs",
+            operation = "generating the witnsses for the circuit of C_fold = C1 + p*C2",
+            elapsed = ?t_sec.elapsed()
+        );
+
         debug_assert!(shape_secondary
             .is_satisfied(&W_comm_trace.0, &W_comm_trace.1, pp_secondary)
             .is_ok());
 
+        let t_ct = std::time::Instant::now();
         let (T, commitment_T) = r1cs::commit_T(
             shape_secondary,
             pp_secondary,
@@ -117,6 +127,12 @@ where
             &W_comm_trace.0,
             &W_comm_trace.1,
         )?;
+        tracing::debug!(
+            target: "hypernova::nimfs",
+            operation = "Committing to the witness of the C1 + p*C2 circuit",
+            elapsed = ?t_ct.elapsed()
+        );
+
         random_oracle.absorb_non_native(&W_comm_trace.0);
         random_oracle.absorb(&commitment_T.into_affine());
         random_oracle.absorb(&cast_field_element_unique::<G1::BaseField, G1::ScalarField>(&rho));
@@ -124,8 +140,14 @@ where
         let rho_p: G1::BaseField =
             random_oracle.squeeze_field_elements_with_sizes(&[SQUEEZE_ELEMENTS_BIT_SIZE])[0];
 
+        let t_fold = std::time::Instant::now();
         let U_secondary = U_secondary.fold(&W_comm_trace.0, &commitment_T, &rho_p)?;
         let W_secondary = W_secondary.fold(&W_comm_trace.1, &T, &rho_p)?;
+        tracing::debug!(
+            target: "hypernova::nimfs",
+            operation = "Adding the witnesses of C1 + p*C2 witnesses",
+            elapsed = ?t_fold.elapsed()
+        );
 
         let commitment_W_proof = secondary::Proof { commitment_T, U: W_comm_trace.0 };
 
@@ -207,6 +229,8 @@ mod tests {
 
     #[test]
     fn prove_verify() {
+        crate::test_utils::tracing::init();   // <- one-time subscriber
+
         prove_verify_with_cycle::<
             ark_bn254::g1::Config,
             ark_grumpkin::GrumpkinConfig,

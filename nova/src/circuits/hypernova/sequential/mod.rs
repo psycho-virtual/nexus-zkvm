@@ -276,15 +276,21 @@ where
                 z_i,
             } = non_base;
 
-            let proof = NIMFSProof::<G1, G2, C1, C2, RO>::prove(
-                &params.pp_secondary,
-                &params.ro_config,
-                &params.digest,
-                (&params.shape, &params.shape_secondary),
-                (&U, &W),
-                (&U_secondary, &W_secondary),
-                (&u, &w),
-            )?;
+            let proof = tracing::debug_span!(
+                target: LOG_TARGET,
+                "prove_nimfs"
+            )
+            .in_scope(|| {
+                NIMFSProof::<G1, G2, C1, C2, RO>::prove(
+                    &params.pp_secondary,
+                    &params.ro_config,
+                    &params.digest,
+                    (&params.shape, &params.shape_secondary),
+                    (&U, &W),
+                    (&U_secondary, &W_secondary),
+                    (&u, &w),
+                )
+            })?;
 
             let input =
                 HyperNovaAugmentedCircuitInput::NonBase(HyperNovaAugmentedCircuitNonBaseInput {
@@ -325,8 +331,9 @@ where
         let cs = ConstraintSystem::new_ref();
         cs.set_mode(SynthesisMode::Prove { construct_matrices: false });
 
-        let circuit =
-            HyperNovaAugmentedCircuit::new(&params.ro_config, step_circuit, sumcheck_rounds, input);
+        let circuit = tracing::debug_span!(target: LOG_TARGET, "create_circuit").in_scope(|| {
+            HyperNovaAugmentedCircuit::new(&params.ro_config, step_circuit, sumcheck_rounds, input)
+        });
 
         let z_i =
             tracing::debug_span!(target: LOG_TARGET, "satisfying_assignment").in_scope(|| {
@@ -339,7 +346,9 @@ where
 
         let w = CCSWitness::<G1> { W: witness };
 
-        let commitment_W = w.commit::<C1>(&params.ck);
+        let commitment_W = tracing::debug_span!(target: LOG_TARGET, "commit_witness").in_scope(|| {
+            w.commit::<C1>(&params.ck)
+        });
         let u = CCSInstance::<G1, C1> { commitment_W, X: pub_io };
 
         let z_i = z_i.iter().map(|z| z.value()).collect::<Result<_, _>>()?;
@@ -472,6 +481,8 @@ pub(crate) mod tests {
 
     #[test]
     fn ivc_base_step() {
+        // Initialize tracing for tests
+        crate::test_utils::tracing::init();
         ivc_base_step_with_cycle::<
             ark_bn254::g1::Config,
             ark_grumpkin::GrumpkinConfig,
@@ -515,6 +526,10 @@ pub(crate) mod tests {
 
     #[test]
     fn ivc_multiple_steps() {
+        use tracing::subscriber::set_global_default;
+        use tracing_subscriber::{filter, fmt::format::FmtSpan, prelude::*};
+        
+        const HYPERNOVA_TARGET: &str = "nexus-nova::hypernova";
         ivc_multiple_steps_with_cycle::<
             ark_bn254::g1::Config,
             ark_grumpkin::GrumpkinConfig,
@@ -562,6 +577,7 @@ pub(crate) mod tests {
             recursive_snark = IVCProof::prove_step(recursive_snark, &params, &circuit)?;
         }
         recursive_snark.verify(&params).unwrap();
+
 
         assert_eq!(&recursive_snark.z_i()[0], &G1::ScalarField::from(44739235));
         Ok(())

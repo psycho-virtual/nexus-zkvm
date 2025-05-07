@@ -58,6 +58,6 @@ ark-grumpkin.workspace = true
 
 tracing-subscriber = { version = "0.3", default-features = false, features = [
    "fmt",
-   "ansi",
+   "env-filter",
 ] }
 zstd = "0.13.0"
