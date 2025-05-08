@@ -435,13 +435,10 @@ mod tests {
         // For the test, instead of using random vs values, compute the actual evaluations
         // of M_j(z) at point r_x for consistency
         let z_test = [&[v0], &io[1..], &CCSWitness::zero(shape).W].concat();
-        println!("Test z vector length: {}", z_test.len());
         
         let vs: Vec<G::ScalarField> = ark_std::cfg_iter!(&shape.Ms)
             .map(|M| vec_to_ark_mle(M.multiply_vec(&z_test).as_slice()).evaluate(&r_x))
             .collect();
-            
-        println!("Computed vs values for test: {:?}", vs);
         
         let v_z = G::ScalarField::rand(rng);
         
@@ -494,18 +491,8 @@ mod tests {
         let num_witness = 4;
         let num_public = 2;
         
-        // Let's print the sizes to debug
-        println!("Matrix A rows: {}, A elements: {}", num_constraints, a.len());
-        
-        // Print matrix details to understand the structure better
-        for (i, row) in a.iter().enumerate() {
-            println!("A[{}] = {:?}", i, row);
-        }
-        
         // Create sparse matrices for our test
         // Note: the SparseMatrix constructor expects (entries, num_rows, num_cols)
-        // Print the actual number of columns present in the test data
-        println!("Matrix dimensions needed: {} rows, {} cols", num_constraints, num_witness + num_public);
         
         // Use correct dimensions from r1cs/mod.rs test data (checked from the test case)
         let matrix_a = SparseMatrix::new(&a, num_constraints, num_witness + num_public);  // 4 rows, 6 cols
@@ -551,13 +538,10 @@ mod tests {
         // For consistency, compute the actual evaluation of M_j(z) at r_x
         // This ensures our targets match what would be computed by the ACCS operations
         let z_test = [&[v0], &X_accs[1..], W_accs.W.as_slice()].concat();
-        println!("Integration test z vector length: {}", z_test.len());
         
         let vs: Vec<Fr> = ark_std::cfg_iter!(&shape.Ms)
             .map(|M| vec_to_ark_mle(M.multiply_vec(&z_test).as_slice()).evaluate(&r_x))
             .collect();
-            
-        println!("Integration test vs values: {:?}", vs);
         
         // For v_z, we'll compute the actual evaluation of W_accs at r_y
         let v_z = vec_to_ark_mle(W_accs.W.as_slice()).evaluate(&r_y);
