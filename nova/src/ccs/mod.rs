@@ -396,6 +396,178 @@ impl<G: CurveGroup, C: PolyCommitmentScheme<G>> LCCSInstance<G, C> {
     }
 }
 
+/// A type that holds an ACCS (Atomic CCS) instance as defined in the KiloNova paper.
+///
+/// Atomic CCS (ACCS) Relations are a relaxed form of Customizable Constraint Systems
+/// that contain independent linear claims on instance-witness pairs and structures.
+/// This enables efficient folding of multiple non-uniform instances without generating cross terms.
+/// ACCS is derived from an "early stopping" version of SuperSpartan.
+#[derive(CanonicalSerialize, CanonicalDeserialize)]
+pub struct ACCSInstance<G: CurveGroup, C: PolyCommitmentScheme<G>> {
+    /// Commitment to multilinear polynomial in s_y - 1 variables
+    pub commitment_W: C::Commitment,
+    /// Scalar value v_0 ∈ F
+    pub v0: G::ScalarField,
+    /// Public inputs io ∈ F^l
+    pub io: Vec<G::ScalarField>,
+    /// Evaluation point for x variables, r_x ∈ F^s_x
+    pub r_x: Vec<G::ScalarField>,
+    /// Evaluation point for y variables, r_y ∈ F^s_y
+    pub r_y: Vec<G::ScalarField>,
+    /// Evaluation targets v_j for j ∈ [t], where t is the number of sparse polynomials
+    pub vs: Vec<G::ScalarField>,
+    /// Evaluation of polynomial z at point r_y
+    pub v_z: G::ScalarField,
+}
+
+impl<G, C> Absorb for ACCSInstance<G, C>
+where
+    G: CurveGroup + AbsorbEmulatedFp<G::ScalarField>,
+    G::ScalarField: Absorb,
+    C: PolyCommitmentScheme<G>,
+    C::Commitment: Into<Vec<G>>,
+{
+    fn to_sponge_bytes(&self, _: &mut Vec<u8>) {
+        unreachable!()
+    }
+
+    fn to_sponge_field_elements<F: PrimeField>(&self, dest: &mut Vec<F>) {
+        self.commitment_W.clone().into().iter().for_each(|c| {
+            <G as AbsorbEmulatedFp<G::ScalarField>>::to_sponge_field_elements(c, dest)
+        });
+
+        self.v0.to_sponge_field_elements(dest);
+        self.io.to_sponge_field_elements(dest);
+        self.r_x.to_sponge_field_elements(dest);
+        self.r_y.to_sponge_field_elements(dest);
+        self.vs.to_sponge_field_elements(dest);
+        self.v_z.to_sponge_field_elements(dest);
+    }
+}
+
+impl<G: CurveGroup, C: PolyCommitmentScheme<G>> ACCSInstance<G, C> {
+    /// Creates a new ACCS instance with the provided parameters
+    pub fn new(
+        commitment_W: &C::Commitment,
+        v0: &G::ScalarField,
+        io: &[G::ScalarField],
+        r_x: &[G::ScalarField],
+        r_y: &[G::ScalarField],
+        vs: &[G::ScalarField],
+        v_z: &G::ScalarField,
+    ) -> Result<Self, Error> {
+        if io.is_empty() {
+            return Err(Error::InvalidInputLength);
+        }
+        
+        Ok(Self {
+            commitment_W: commitment_W.clone(),
+            v0: *v0,
+            io: io.to_owned(),
+            r_x: r_x.to_owned(),
+            r_y: r_y.to_owned(),
+            vs: vs.to_owned(),
+            v_z: *v_z,
+        })
+    }
+    
+    /// Folds two ACCS instances together
+    pub fn fold(
+        &self,
+        other: &ACCSInstance<G, C>,
+        rho: &G::ScalarField,
+    ) -> Result<Self, Error> {
+        // Check that dimensions match
+        if self.io.len() != other.io.len() ||
+           self.r_x.len() != other.r_x.len() ||
+           self.r_y.len() != other.r_y.len() ||
+           self.vs.len() != other.vs.len() {
+            return Err(Error::InvalidInputLength);
+        }
+        
+        // Fold the commitments
+        let commitment_W = self.commitment_W.clone() + other.commitment_W.clone() * *rho;
+        
+        // Fold v0
+        let v0 = self.v0 + *rho * other.v0;
+        
+        // Fold io values
+        let io: Vec<G::ScalarField> = ark_std::cfg_iter!(&self.io)
+            .zip(&other.io)
+            .map(|(a, b)| *a + *rho * *b)
+            .collect();
+            
+        // r_x and r_y are typically challenge points and stay the same
+        // This is a design decision - in some protocols they could be folded
+        let r_x = self.r_x.clone();
+        let r_y = self.r_y.clone();
+        
+        // Fold the evaluation targets
+        let vs: Vec<G::ScalarField> = ark_std::cfg_iter!(&self.vs)
+            .zip(&other.vs)
+            .map(|(a, b)| *a + *rho * *b)
+            .collect();
+            
+        // Fold v_z
+        let v_z = self.v_z + *rho * other.v_z;
+        
+        Ok(Self {
+            commitment_W,
+            v0,
+            io,
+            r_x,
+            r_y,
+            vs,
+            v_z,
+        })
+    }
+}
+
+impl<G: CurveGroup, C: PolyCommitmentScheme<G>> fmt::Debug for ACCSInstance<G, C>
+where
+    C::Commitment: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ACCSInstance")
+            .field("commitment_W", &self.commitment_W)
+            .field("v0", &self.v0)
+            .field("io", &self.io)
+            .field("r_x", &self.r_x)
+            .field("r_y", &self.r_y)
+            .field("vs", &self.vs)
+            .field("v_z", &self.v_z)
+            .finish()
+    }
+}
+
+impl<G: CurveGroup, C: PolyCommitmentScheme<G>> Clone for ACCSInstance<G, C> {
+    fn clone(&self) -> Self {
+        Self {
+            commitment_W: self.commitment_W.clone(),
+            v0: self.v0,
+            io: self.io.clone(),
+            r_x: self.r_x.clone(),
+            r_y: self.r_y.clone(),
+            vs: self.vs.clone(),
+            v_z: self.v_z,
+        }
+    }
+}
+
+impl<G: CurveGroup, C: PolyCommitmentScheme<G>> PartialEq for ACCSInstance<G, C> {
+    fn eq(&self, other: &Self) -> bool {
+        self.commitment_W == other.commitment_W &&
+        self.v0 == other.v0 &&
+        self.io == other.io &&
+        self.r_x == other.r_x &&
+        self.r_y == other.r_y &&
+        self.vs == other.vs &&
+        self.v_z == other.v_z
+    }
+}
+
+impl<G: CurveGroup, C: PolyCommitmentScheme<G>> Eq for ACCSInstance<G, C> where C::Commitment: Eq {}
+
 /// A type that holds an LCCS instance.
 #[derive(CanonicalSerialize, CanonicalDeserialize)]
 pub struct LCCSInstance<G: CurveGroup, C: PolyCommitmentScheme<G>> {
@@ -462,6 +634,231 @@ mod tests {
     type Z = Zeromorph<E>;
 
     use crate::r1cs::tests::{to_field_elements, to_field_sparse, A, B, C};
+    
+    // Tests for ACCSInstance
+    #[test]
+    fn test_accs_create() -> Result<(), Error> {
+        let mut rng = test_rng();
+        
+        // Set up parameters for SRS
+        let SRS = Z::setup(3, b"test", &mut rng).unwrap();
+        let PCSKeys { ck, .. } = Z::trim(&SRS, 3);
+        
+        // Create a simple witness
+        let W = to_field_elements::<G>(&[3, 9, 27, 30]);
+        let witness = CCSWitness::<G>::new(
+            &CCSShape::<G> { 
+                num_constraints: 4, 
+                num_vars: 4, 
+                num_io: 2, 
+                num_matrices: 3, 
+                num_multisets: 2,
+                max_cardinality: 2,
+                Ms: vec![],  // Empty for test
+                cSs: vec![], // Empty for test
+            }, 
+            &W
+        )?;
+        
+        // Create commitment
+        let commitment_W = witness.commit::<Z>(&ck);
+        
+        // Create ACCS instance parameters
+        let v0 = Fr::from(42u32);
+        let io = to_field_elements::<G>(&[1, 35]);
+        let r_x: Vec<Fr> = (0..3).map(|_| Fr::rand(&mut rng)).collect();
+        let r_y: Vec<Fr> = (0..4).map(|_| Fr::rand(&mut rng)).collect();
+        let vs: Vec<Fr> = (0..3).map(|_| Fr::rand(&mut rng)).collect();
+        let v_z = Fr::from(123u32);
+        
+        // Create the instance
+        let accs = ACCSInstance::<G, Z>::new(
+            &commitment_W,
+            &v0,
+            &io,
+            &r_x.as_slice(),
+            &r_y.as_slice(),
+            &vs.as_slice(),
+            &v_z,
+        )?;
+        
+        // Verify fields are correctly set
+        assert_eq!(accs.commitment_W, commitment_W);
+        assert_eq!(accs.v0, v0);
+        assert_eq!(accs.io, io);
+        assert_eq!(accs.r_x, r_x);
+        assert_eq!(accs.r_y, r_y);
+        assert_eq!(accs.vs, vs);
+        assert_eq!(accs.v_z, v_z);
+        
+        Ok(())
+    }
+    
+    #[test]
+    fn test_accs_fold() -> Result<(), Error> {
+        let mut rng = test_rng();
+        
+        // Set up parameters for SRS
+        let SRS = Z::setup(3, b"test", &mut rng).unwrap();
+        let PCSKeys { ck, .. } = Z::trim(&SRS, 3);
+        
+        // Create two simple witnesses
+        let W1 = to_field_elements::<G>(&[3, 9, 27, 30]);
+        let W2 = to_field_elements::<G>(&[4, 10, 28, 31]);
+        
+        let shape = CCSShape::<G> { 
+            num_constraints: 4, 
+            num_vars: 4, 
+            num_io: 2, 
+            num_matrices: 3, 
+            num_multisets: 2,
+            max_cardinality: 2,
+            Ms: vec![],  // Empty for test
+            cSs: vec![], // Empty for test
+        };
+        
+        let witness1 = CCSWitness::<G>::new(&shape, &W1)?;
+        let witness2 = CCSWitness::<G>::new(&shape, &W2)?;
+        
+        // Create commitments
+        let commitment_W1 = witness1.commit::<Z>(&ck);
+        let commitment_W2 = witness2.commit::<Z>(&ck);
+        
+        // Create ACCS instance parameters
+        let v0_1 = Fr::from(42u32);
+        let v0_2 = Fr::from(24u32);
+        let io = to_field_elements::<G>(&[1, 35]);
+        let r_x: Vec<Fr> = (0..3).map(|_| Fr::rand(&mut rng)).collect();
+        let r_y: Vec<Fr> = (0..4).map(|_| Fr::rand(&mut rng)).collect();
+        let vs1: Vec<Fr> = (0..3).map(|_| Fr::rand(&mut rng)).collect();
+        let vs2: Vec<Fr> = (0..3).map(|_| Fr::rand(&mut rng)).collect();
+        let v_z1 = Fr::from(123u32);
+        let v_z2 = Fr::from(456u32);
+        
+        // Create the instances
+        let accs1 = ACCSInstance::<G, Z>::new(
+            &commitment_W1,
+            &v0_1,
+            &io,
+            &r_x.as_slice(),
+            &r_y.as_slice(),
+            &vs1.as_slice(),
+            &v_z1,
+        )?;
+        
+        let accs2 = ACCSInstance::<G, Z>::new(
+            &commitment_W2,
+            &v0_2,
+            &io,
+            &r_x.as_slice(),
+            &r_y.as_slice(),
+            &vs2.as_slice(),
+            &v_z2,
+        )?;
+        
+        // Folding factor
+        let rho = Fr::from(7u32);
+        
+        // Fold the instances
+        let folded_accs = accs1.fold(&accs2, &rho)?;
+        
+        // Verify folded fields are correctly computed
+        assert_eq!(folded_accs.commitment_W, commitment_W1 + commitment_W2 * rho);
+        assert_eq!(folded_accs.v0, v0_1 + rho * v0_2);
+        
+        // Check vs array folding
+        for i in 0..vs1.len() {
+            assert_eq!(folded_accs.vs[i], vs1[i] + rho * vs2[i]);
+        }
+        
+        // Check v_z folding
+        assert_eq!(folded_accs.v_z, v_z1 + rho * v_z2);
+        
+        Ok(())
+    }
+    
+    #[test]
+    fn test_accs_invalid_inputs() -> Result<(), Error> {
+        let mut rng = test_rng();
+        
+        // Set up parameters for SRS
+        let SRS = Z::setup(3, b"test", &mut rng).unwrap();
+        let PCSKeys { ck, .. } = Z::trim(&SRS, 3);
+        
+        // Create a simple witness
+        let W = to_field_elements::<G>(&[3, 9, 27, 30]);
+        let witness = CCSWitness::<G>::new(
+            &CCSShape::<G> { 
+                num_constraints: 4, 
+                num_vars: 4, 
+                num_io: 2, 
+                num_matrices: 3, 
+                num_multisets: 2,
+                max_cardinality: 2,
+                Ms: vec![],  // Empty for test
+                cSs: vec![], // Empty for test
+            }, 
+            &W
+        )?;
+        
+        // Create commitment
+        let commitment_W = witness.commit::<Z>(&ck);
+        
+        // Create ACCS instance parameters
+        let v0 = Fr::from(42u32);
+        let empty_io: Vec<Fr> = vec![];
+        let r_x: Vec<Fr> = (0..3).map(|_| Fr::rand(&mut rng)).collect();
+        let r_y: Vec<Fr> = (0..4).map(|_| Fr::rand(&mut rng)).collect();
+        let vs: Vec<Fr> = (0..3).map(|_| Fr::rand(&mut rng)).collect();
+        let v_z = Fr::from(123u32);
+        
+        // Test with empty io (should fail)
+        let result = ACCSInstance::<G, Z>::new(
+            &commitment_W,
+            &v0,
+            &empty_io,
+            &r_x.as_slice(),
+            &r_y.as_slice(),
+            &vs.as_slice(),
+            &v_z,
+        );
+        
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), Error::InvalidInputLength);
+        
+        // Create two valid instances with different length fields
+        let valid_io = to_field_elements::<G>(&[1, 35]);
+        let accs1 = ACCSInstance::<G, Z>::new(
+            &commitment_W,
+            &v0,
+            &valid_io,
+            &r_x.as_slice(),
+            &r_y.as_slice(),
+            &vs.as_slice(),
+            &v_z,
+        )?;
+        
+        // Create a second instance with different sized vs
+        let different_vs: Vec<Fr> = (0..4).map(|_| Fr::rand(&mut rng)).collect();
+        let accs2 = ACCSInstance::<G, Z>::new(
+            &commitment_W,
+            &v0,
+            &valid_io,
+            &r_x.as_slice(),
+            &r_y.as_slice(),
+            &different_vs.as_slice(),
+            &v_z,
+        )?;
+        
+        // Test folding with mismatched vs lengths (should fail)
+        let rho = Fr::from(7u32);
+        let result = accs1.fold(&accs2, &rho);
+        
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), Error::InvalidInputLength);
+        
+        Ok(())
+    }
 
     #[test]
     fn test_r1cs_to_ccs() -> Result<(), Error> {
