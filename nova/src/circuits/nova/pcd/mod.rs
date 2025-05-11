@@ -64,6 +64,7 @@ use crate::{
 mod augmented;
 
 pub mod compression;
+pub mod tree;
 
 use augmented::{
     NovaAugmentedCircuit, NovaAugmentedCircuitInput, NovaAugmentedCircuitNonBaseInput, PCDNodeInput,
