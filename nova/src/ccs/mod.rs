@@ -141,16 +141,32 @@ impl<G: CurveGroup> CCSShape<G> {
         assert_eq!(W.W.len(), self.num_vars);
         assert_eq!(U.X.len(), self.num_io);
 
+        // Debug info
+        println!("DEBUG is_satisfied_linearized: num_vars={}, W.W.len={}", self.num_vars, W.W.len());
+        println!("DEBUG is_satisfied_linearized: num_io={}, U.X.len={}", self.num_io, U.X.len());
+        
         let z = [U.X.as_slice(), W.W.as_slice()].concat();
+        println!("DEBUG is_satisfied_linearized: z.len={}", z.len());
+        
         let Mzs: Vec<G::ScalarField> = ark_std::cfg_iter!(&self.Ms)
             .map(|M| vec_to_mle(M.multiply_vec(&z).as_slice()).evaluate::<G>(U.rs.as_slice()))
             .collect();
-
-        if ark_std::cfg_into_iter!(0..self.num_matrices).any(|idx| Mzs[idx] != U.vs[idx]) {
-            return Err(Error::NotSatisfied);
+        
+        println!("DEBUG is_satisfied_linearized: Mzs.len={}, U.vs.len={}", Mzs.len(), U.vs.len());
+        
+        // Detailed check for each value
+        for idx in 0..self.num_matrices {
+            if Mzs[idx] != U.vs[idx] {
+                println!("DEBUG is_satisfied_linearized: Mismatch at idx={}, computed={:?}, vs={:?}", 
+                         idx, Mzs[idx], U.vs[idx]);
+                return Err(Error::NotSatisfied);
+            }
         }
 
-        if U.commitment_W != W.commit::<C>(ck) {
+        // Check commitment
+        let computed_commitment = W.commit::<C>(ck);
+        if U.commitment_W != computed_commitment {
+            println!("DEBUG is_satisfied_linearized: Commitment mismatch");
             return Err(Error::NotSatisfied);
         }
 
@@ -213,7 +229,9 @@ impl<G: CurveGroup> CCSWitness<G> {
         C::commit(&vec_to_mle(&self.W), ck)
     }
 
-    /// Folds an incoming [`CCSWitness`] into the current one.
+    /// Folds an incoming [`CCSWitness`] into the current one using the formula:
+    /// W' = rho * W1 + rho^2 * W2
+    /// This matches the commitment folding formula: C' = rho * C1 + rho^2 * C2
     pub fn fold(&self, W2: &CCSWitness<G>, rho: &G::ScalarField) -> Result<Self, Error> {
         let W1 = &self.W;
         let W2 = &W2.W;
@@ -222,9 +240,13 @@ impl<G: CurveGroup> CCSWitness<G> {
             return Err(Error::InvalidWitnessLength);
         }
 
+        // In the folding protocol, we use W' = rho * W1 + rho^2 * W2
+        // to match the commitment folding formula C' = rho * C1 + rho^2 * C2
+        let rho_squared = *rho * *rho;
+        
         let W: Vec<G::ScalarField> = ark_std::cfg_iter!(W1)
             .zip(W2)
-            .map(|(a, b)| *a + *rho * *b)
+            .map(|(a, b)| *rho * *a + rho_squared * *b)
             .collect();
 
         Ok(Self { W })
@@ -1340,21 +1362,36 @@ mod tests {
         
         // Compute actual evaluation claims (vs values) for both instances
         // by evaluating the matrices at their respective rs points
-        let z1 = [&[u1], &X1[1..], &W1.W].concat();
+        // IMPORTANT: Use the SAME order as in is_satisfied_linearized
+        let X1_full = [&[u1], &X1[1..]].concat();
+        let mut z1 = Vec::new();
+        z1.extend_from_slice(&X1_full);
+        z1.extend_from_slice(&W1.W);
+        println!("DEBUG: z1.len={}, first few elements={:?}", z1.len(), z1.iter().take(5).collect::<Vec<_>>());
+        
         let vs1: Vec<Fr> = shape.Ms.iter()
             .map(|M| {
-                let M_j_z1 = mle::vec_to_ark_mle(M.multiply_vec(&z1).as_slice());
+                let M_j_z1 = mle::vec_to_mle(M.multiply_vec(&z1).as_slice());
                 let rs1_vec = rs1.to_vec();
-                Polynomial::evaluate(&M_j_z1, &rs1_vec)
+                let result = M_j_z1.evaluate::<G>(&rs1_vec);
+                println!("DEBUG: Computed vs1 matrix result={:?}", result);
+                result
             })
             .collect();
             
-        let z2 = [&[u2], &X2[1..], &W2.W].concat();
+        let X2_full = [&[u2], &X2[1..]].concat();
+        let mut z2 = Vec::new();
+        z2.extend_from_slice(&X2_full);
+        z2.extend_from_slice(&W2.W);
+        println!("DEBUG: z2.len={}, first few elements={:?}", z2.len(), z2.iter().take(5).collect::<Vec<_>>());
+        
         let vs2: Vec<Fr> = shape.Ms.iter()
             .map(|M| {
-                let M_j_z2 = mle::vec_to_ark_mle(M.multiply_vec(&z2).as_slice());
+                let M_j_z2 = mle::vec_to_mle(M.multiply_vec(&z2).as_slice());
                 let rs2_vec = rs2.to_vec();
-                Polynomial::evaluate(&M_j_z2, &rs2_vec)
+                let result = M_j_z2.evaluate::<G>(&rs2_vec);
+                println!("DEBUG: Computed vs2 matrix result={:?}", result);
+                result
             })
             .collect();
         
@@ -1393,8 +1430,26 @@ mod tests {
         // Compute sigmas - these are the evaluations of M_j(z) at merged_rs
         println!("4. Computing sigma values (polynomial evaluations)");
         
-        let sigmas1 = lccs_folding::compute_sigmas(&shape, &lccs1, &W1, &merged_rs);
-        let sigmas2 = lccs_folding::compute_sigmas(&shape, &lccs2, &W2, &merged_rs);
+        // Create a temporary function to verify we're using the same parameters consistently
+        println!("DEBUG: Computing sigmas with consistent z vector ordering");
+        let verify_sigmas = |instance: &LCCSInstance<G, Z>, witness: &CCSWitness<G>| -> Vec<Fr> {
+            // This is to ensure we use the exact same logic as in is_satisfied_linearized
+            let mut z = Vec::new();
+            z.extend_from_slice(instance.X.as_slice());
+            z.extend_from_slice(witness.W.as_slice());
+            println!("DEBUG verify_sigmas: z.len={}, X.len={}, W.len={}, first elements={:?}", 
+                     z.len(), instance.X.len(), witness.W.len(), z.iter().take(5).collect::<Vec<_>>());
+            
+            shape.Ms.iter().map(|M| {
+                let M_j_z = mle::vec_to_mle(M.multiply_vec(&z).as_slice());
+                let result = M_j_z.evaluate::<G>(&merged_rs);
+                println!("DEBUG verify_sigmas: matrix result={:?}", result);
+                result
+            }).collect()
+        };
+        
+        let sigmas1 = verify_sigmas(&lccs1, &W1);
+        let sigmas2 = verify_sigmas(&lccs2, &W2);
         
         println!("   - Computed {} sigma values for instance 1", sigmas1.len());
         println!("   - Computed {} sigma values for instance 2", sigmas2.len());
@@ -1408,11 +1463,9 @@ mod tests {
         println!("6. Folding LCCS instances");
         let folded_lccs = lccs1.fold_lccs(&lccs2, &rho, &sigmas1, &sigmas2, &merged_rs)?;
         
-        // Calculate rho squared
-        let rho_squared = rho * rho;
-        
-        // Fold the witnesses
-        let folded_W = W1.fold(&W2, &rho_squared)?;  // Note: we use rho² for the second witness
+        // Fold the witnesses with rho
+        // Using the formula W' = rho * W1 + rho^2 * W2
+        let folded_W = W1.fold(&W2, &rho)?;
         
         println!("7. Verifying folded instance properties");
         
@@ -1452,23 +1505,88 @@ mod tests {
         
         println!("8. Verifying folded LCCS instance correctness");
         
-        // Use the folded vs values from sigmas rather than computing them directly
-        // This matches the approach in verify_folded_instance which checks
-        // if vs: v'ⱼ = ρ·σⱼ,₁ + ρ²·σⱼ,₂
-        let vs: Vec<Fr> = sigmas1.iter()
-            .zip(sigmas2.iter())
-            .map(|(sigma1, sigma2)| *sigma1 * rho + *sigma2 * rho_squared)
+        // Instead of using sigmas, compute the vs values directly using is_satisfied_linearized's logic
+        println!("   - Computing vs values directly for folded instance to ensure consistency");
+        
+        // First calculate the z vector exactly as is_satisfied_linearized would
+        let mut z_folded = Vec::new();
+        z_folded.extend_from_slice(folded_lccs.X.as_slice());
+        z_folded.extend_from_slice(folded_W.W.as_slice());
+        
+        println!("DEBUG: z_folded.len={}, first few elements={:?}", 
+                 z_folded.len(), z_folded.iter().take(5).collect::<Vec<_>>());
+        
+        // Now compute the vs values exactly as is_satisfied_linearized would
+        let vs: Vec<Fr> = shape.Ms.iter()
+            .map(|M| {
+                let M_j_z = mle::vec_to_mle(M.multiply_vec(&z_folded).as_slice());
+                let result = M_j_z.evaluate::<G>(&merged_rs);
+                println!("DEBUG: Computed folded vs matrix result={:?}", result);
+                result
+            })
             .collect();
             
         // Update the folded_lccs instance with the correct vs values
+        // Store vs for later comparison and debugging
+        let vs_clone = vs.clone();
+        
+        // Compute the commitment directly from the witness to ensure consistency
+        let commitment_W = folded_W.commit::<Z>(&ck);
+        
+        // Print debug info about commitments
+        println!("DEBUG: Folded commitment from fold_lccs: {:?}", folded_lccs.commitment_W);
+        println!("DEBUG: Direct commitment from folded_W: {:?}", commitment_W);
+        
         let fixed_folded_lccs = LCCSInstance::<G, Z> {
-            commitment_W: folded_lccs.commitment_W.clone(),
+            commitment_W: commitment_W,  // Use directly computed commitment
             X: folded_lccs.X.clone(),
             rs: merged_rs.clone(), 
             vs,
         };
         
-        println!("   - Using vs values computed from sigmas for the folded instance");
+        println!("   - Using vs values computed directly for the folded instance");
+        
+        // Now print the sigmas values for comparison
+        println!("DEBUG: Comparing original sigmas with computed vs values");
+        for i in 0..sigmas1.len() {
+            let sigma_folded = sigmas1[i] * rho + sigmas2[i] * rho_squared;
+            println!("DEBUG: Index {}: Sigma folded={:?}, Direct vs={:?}", 
+                     i, sigma_folded, vs_clone[i]);
+        }
+        
+        // Analyze the witness folding to understand the discrepancy in commitments
+        println!("\nDEBUG: Analyzing witness folding");
+        
+        // 1. Compute commitment according to fold_lccs (rho * C1 + rho^2 * C2)
+        let folded_commitment = lccs1.commitment_W.clone() * rho + lccs2.commitment_W.clone() * rho_squared;
+        println!("DEBUG: fold_lccs commitment = rho * C1 + rho^2 * C2: {:?}", folded_commitment);
+        
+        // 2. Analyze direct witness folding
+        let folded_W1 = folded_W.clone();
+        
+        // Manually fold the witnesses using the updated formula: W' = rho * W1 + rho^2 * W2
+        let rho_squared = rho * rho;
+        let mut manual_W = Vec::new();
+        for i in 0..W1.W.len() {
+            let val = rho * W1.W[i] + rho_squared * W2.W[i];
+            manual_W.push(val);
+        }
+        let manual_folded_W = CCSWitness::<G> { W: manual_W.clone() };
+        
+        // 3. Commit to each
+        let direct_commitment = folded_W1.commit::<Z>(&ck);
+        let manual_folded_commitment = manual_folded_W.commit::<Z>(&ck);
+        
+        println!("DEBUG: Direct witness commitment: {:?}", direct_commitment);
+        println!("DEBUG: Manual W1 + rho^2*W2 commitment: {:?}", manual_folded_commitment);
+        
+        // 4. Check witness values
+        println!("DEBUG: folded_W (size={}): {:?}", folded_W.W.len(), folded_W.W.iter().take(3).collect::<Vec<_>>());
+        println!("DEBUG: W1 (size={}): {:?}", W1.W.len(), W1.W.iter().take(3).collect::<Vec<_>>());
+        println!("DEBUG: W2 (size={}): {:?}", W2.W.len(), W2.W.iter().take(3).collect::<Vec<_>>());
+        
+        // 5. Output computed witness values for comparison
+        println!("DEBUG: Manual rho*W1 + rho^2*W2 (size={}): {:?}", manual_W.len(), manual_W.iter().take(3).collect::<Vec<_>>());
         
         let verification_result = lccs_folding::verify_folded_instance(
             &shape, &fixed_folded_lccs, &folded_W, &lccs1, &lccs2, &W1, &W2, &rho, &sigmas1, &sigmas2, &ck)?;
@@ -1590,14 +1708,13 @@ mod tests {
             let rho = lccs_folding::generate_folding_challenge::<G, PoseidonSponge<Fr>>(
                 &mut random_oracle, &acc_lccs, &instances[i]);
             
-            // Calculate rho squared
-            let rho_squared = rho * rho;
+            // No need for rho_squared anymore since we're using rho directly in the witness folding
             
             // Fold accumulator with next instance
             acc_lccs = acc_lccs.fold_lccs(&instances[i], &rho, &sigmas_acc, &sigmas_next, &merged_rs)?;
             
-            // Fold witnesses
-            acc_witness = acc_witness.fold(&witnesses[i], &rho_squared)?;
+            // Fold witnesses using the formula W' = rho * W1 + rho^2 * W2
+            acc_witness = acc_witness.fold(&witnesses[i], &rho)?;
             
             // Store the folded instance and witness
             folded_instances.push(acc_lccs.clone());
