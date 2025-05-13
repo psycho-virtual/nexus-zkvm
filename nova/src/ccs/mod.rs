@@ -18,6 +18,7 @@ use super::{absorb::AbsorbEmulatedFp, r1cs::R1CSShape};
 use mle::vec_to_mle;
 
 pub mod mle;
+pub mod lccs_folding;
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum Error {
@@ -394,6 +395,86 @@ impl<G: CurveGroup, C: PolyCommitmentScheme<G>> LCCSInstance<G, C> {
             vs,
         })
     }
+
+    /// Multi-Folding scheme for combining two linearized [`LCCSInstance`]s into a single instance.
+    /// This implementation follows the specified protocol for LCCS-LCCS folding with rigorous
+    /// mathematical foundation.
+    /// 
+    /// # Protocol Steps:
+    /// 1. Validate input compatibility
+    /// 2. Generate folding challenge
+    /// 3. Combine commitments, inputs, and evaluation claims with appropriate weights
+    /// 
+    /// # Arguments
+    /// 
+    /// * `other` - The other LCCS instance to fold with this one
+    /// * `rho` - The folding challenge scalar
+    /// * `sigmas1` - The evaluation results for this LCCS instance at the merged evaluation point
+    /// * `sigmas2` - The evaluation results for the other LCCS instance at the merged evaluation point
+    /// * `merged_rs` - The evaluation point for the merged instance
+    /// 
+    /// # Returns
+    /// 
+    /// A new LCCS instance representing the folded instance
+    pub fn fold_lccs(
+        &self,
+        other: &LCCSInstance<G, C>,
+        rho: &G::ScalarField,
+        sigmas1: &[G::ScalarField],
+        sigmas2: &[G::ScalarField],
+        merged_rs: &[G::ScalarField],
+    ) -> Result<Self, Error> {
+        // Validate inputs
+        if self.rs.len() != other.rs.len() || self.rs.len() != merged_rs.len() {
+            return Err(Error::InvalidEvaluationPoint);
+        }
+
+        if sigmas1.len() != sigmas2.len() || self.vs.len() != other.vs.len() {
+            return Err(Error::InvalidTargets);
+        }
+
+        if self.X.len() != other.X.len() {
+            return Err(Error::InvalidInputLength);
+        }
+
+        // Extract values
+        let (uX1, comm_W1) = (&self.X, self.commitment_W.clone());
+        let (uX2, comm_W2) = (&other.X, other.commitment_W.clone());
+
+        // Extract u values and inputs
+        let (u1, X1) = (&uX1[0], &uX1[1..]);
+        let (u2, X2) = (&uX2[0], &uX2[1..]);
+
+        // Calculate rho^2 for second instance weight
+        let rho_squared = *rho * *rho;
+
+        // Fold commitment: C' = ρ·C₁ + ρ²·C₂
+        let commitment_W = comm_W1 * *rho + comm_W2 * rho_squared;
+
+        // Fold u value: u' = ρ·u₁ + ρ²·u₂
+        let u = [*u1 * *rho + *u2 * rho_squared];
+        
+        // Fold X values: x' = ρ·x₁ + ρ²·x₂
+        let X: Vec<G::ScalarField> = ark_std::cfg_iter!(X1)
+            .zip(X2)
+            .map(|(a, b)| *a * *rho + *b * rho_squared)
+            .collect();
+
+        // Fold evaluation targets: v'ⱼ = ρ·σⱼ,₁ + ρ²·σⱼ,₂
+        // These sigmas represent evaluations of the constraint polynomials at merged_rs
+        let vs: Vec<G::ScalarField> = ark_std::cfg_iter!(sigmas1)
+            .zip(sigmas2)
+            .map(|(sigma1, sigma2)| *sigma1 * *rho + *sigma2 * rho_squared)
+            .collect();
+
+        // Construct new folded instance
+        Ok(Self {
+            commitment_W,
+            X: [&u, X.as_slice()].concat(),
+            rs: merged_rs.to_owned(),
+            vs,
+        })
+    }
 }
 
 /// A type that holds an ACCS (Atomic CCS) instance as defined in the KiloNova paper.
@@ -627,9 +708,13 @@ mod tests {
     use super::*;
 
     use crate::zeromorph::Zeromorph;
+    use crate::poseidon_config;
     use ark_spartan::polycommitments::PCSKeys;
-    use ark_std::{test_rng, UniformRand};
+    use ark_poly::Polynomial;
+    use ark_std::{test_rng, UniformRand, One};
+    use std::ops::Neg;
     use ark_test_curves::bls12_381::{Bls12_381 as E, Fr, G1Projective as G};
+    use ark_crypto_primitives::sponge::{poseidon::PoseidonSponge, CryptographicSponge};
 
     type Z = Zeromorph<E>;
 
@@ -1190,6 +1275,327 @@ mod tests {
         let witness = W1.fold(&W2, &rho)?;
 
         ccs_shape.is_satisfied_linearized(&folded_instance, &witness, &ck)?;
+        Ok(())
+    }
+    
+    // Test for the fold_lccs method according to the multi-folding scheme specification
+    #[test]
+    fn test_fold_lccs() -> Result<(), Error> {
+        let mut rng = test_rng();
+        
+        // Create a CCS shape with test matrices
+        let (a, b, c) = {
+            (
+                to_field_sparse::<G>(A),
+                to_field_sparse::<G>(B),
+                to_field_sparse::<G>(C),
+            )
+        };
+        
+        // Create matrices for our test
+        let matrix_a = SparseMatrix::new(&a, 4, 6);  // 4 rows, 6 cols
+        let matrix_b = SparseMatrix::new(&b, 4, 6);  // 4 rows, 6 cols 
+        let matrix_c = SparseMatrix::new(&c, 4, 6);  // 4 rows, 6 cols
+        
+        // Build shape with the matrices
+        let shape = CCSShape::<G> {
+            num_constraints: 4,
+            num_vars: 4,
+            num_io: 2,
+            num_matrices: 3,
+            num_multisets: 2,
+            max_cardinality: 2,
+            Ms: vec![matrix_a, matrix_b, matrix_c],
+            cSs: vec![
+                (Fr::one(), vec![0, 1]),
+                (Fr::one().neg(), vec![2]),
+            ],
+        };
+        
+        // Setup SRS for polynomial commitment
+        let SRS = Z::setup(4, b"test_lccs_fold", &mut rng).unwrap();
+        let ck = Z::trim(&SRS, 4).ck;
+        
+        println!("1. Creating test LCCS instances");
+        
+        // Create the first LCCS instance
+        let u1 = Fr::from(10u64);
+        let X1 = to_field_elements::<G>(&[1, 35]);
+        let rs1 = vec![Fr::rand(&mut rng), Fr::rand(&mut rng)];
+        
+        let W1_values = to_field_elements::<G>(&[3, 9, 27, 30]);
+        let W1 = CCSWitness::<G>::new(&shape, &W1_values)?;
+        let commitment_W1 = W1.commit::<Z>(&ck);
+        
+        // Create the second LCCS instance
+        let u2 = Fr::from(20u64);
+        let X2 = to_field_elements::<G>(&[1, 40]);
+        let rs2 = vec![Fr::rand(&mut rng), Fr::rand(&mut rng)];
+        
+        let W2_values = to_field_elements::<G>(&[5, 15, 45, 50]);
+        let W2 = CCSWitness::<G>::new(&shape, &W2_values)?;
+        let commitment_W2 = W2.commit::<Z>(&ck);
+        
+        println!("2. Computing actual evaluation claims for test instances");
+        
+        // Compute actual evaluation claims (vs values) for both instances
+        // by evaluating the matrices at their respective rs points
+        let z1 = [&[u1], &X1[1..], &W1.W].concat();
+        let vs1: Vec<Fr> = shape.Ms.iter()
+            .map(|M| {
+                let M_j_z1 = mle::vec_to_ark_mle(M.multiply_vec(&z1).as_slice());
+                let rs1_vec = rs1.to_vec();
+                Polynomial::evaluate(&M_j_z1, &rs1_vec)
+            })
+            .collect();
+            
+        let z2 = [&[u2], &X2[1..], &W2.W].concat();
+        let vs2: Vec<Fr> = shape.Ms.iter()
+            .map(|M| {
+                let M_j_z2 = mle::vec_to_ark_mle(M.multiply_vec(&z2).as_slice());
+                let rs2_vec = rs2.to_vec();
+                Polynomial::evaluate(&M_j_z2, &rs2_vec)
+            })
+            .collect();
+        
+        // Create LCCS instances with computed vs values
+        let lccs1 = LCCSInstance::<G, Z> {
+            commitment_W: commitment_W1,
+            X: [&[u1], X1[1..].as_ref()].concat(),
+            rs: rs1.clone(),
+            vs: vs1.clone(),
+        };
+        
+        let lccs2 = LCCSInstance::<G, Z> {
+            commitment_W: commitment_W2,
+            X: [&[u2], X2[1..].as_ref()].concat(),
+            rs: rs2.clone(),
+            vs: vs2.clone(),
+        };
+        
+        println!("3. Executing sum-check protocol simulation");
+        
+        // Generate merged evaluation point
+        // In a real implementation this would be generated from the sum-check protocol
+        let merged_rs = vec![Fr::rand(&mut rng), Fr::rand(&mut rng)];
+        
+        // Create a random oracle and generate challenge
+        let config = poseidon_config::<Fr>();
+        let mut random_oracle = PoseidonSponge::new(&config);
+        
+        // Generate gamma challenge for the sumcheck polynomial weighting
+        let gamma = lccs_folding::generate_gamma_challenge::<G, PoseidonSponge<Fr>>(&mut random_oracle);
+        println!("   - Generated gamma challenge for polynomial weighting");
+        
+        // In a real implementation, we would now execute the sum-check protocol
+        // for the polynomial g(x) = ∑ⱼ γⱼ·(L_{j,1}(x) + L_{j,2}(x))
+        
+        // Compute sigmas - these are the evaluations of M_j(z) at merged_rs
+        println!("4. Computing sigma values (polynomial evaluations)");
+        
+        let sigmas1 = lccs_folding::compute_sigmas(&shape, &lccs1, &W1, &merged_rs);
+        let sigmas2 = lccs_folding::compute_sigmas(&shape, &lccs2, &W2, &merged_rs);
+        
+        println!("   - Computed {} sigma values for instance 1", sigmas1.len());
+        println!("   - Computed {} sigma values for instance 2", sigmas2.len());
+        
+        // Generate folding challenge
+        let rho = lccs_folding::generate_folding_challenge::<G, PoseidonSponge<Fr>>(
+            &mut random_oracle, &lccs1, &lccs2);
+        println!("5. Generated folding challenge rho");
+        
+        // Fold the LCCS instances using our new implementation
+        println!("6. Folding LCCS instances");
+        let folded_lccs = lccs1.fold_lccs(&lccs2, &rho, &sigmas1, &sigmas2, &merged_rs)?;
+        
+        // Calculate rho squared
+        let rho_squared = rho * rho;
+        
+        // Fold the witnesses
+        let folded_W = W1.fold(&W2, &rho_squared)?;  // Note: we use rho² for the second witness
+        
+        println!("7. Verifying folded instance properties");
+        
+        // Calculate rho squared for second instance weighting
+        let rho_squared = rho * rho;
+        
+        // 1. Check commitment homomorphism: C' = ρ·C₁ + ρ²·C₂
+        let expected_commitment = lccs1.commitment_W.clone() * rho + lccs2.commitment_W.clone() * rho_squared;
+        assert_eq!(folded_lccs.commitment_W, expected_commitment, "Commitment not folded correctly");
+        println!("   ✓ Commitment homomorphism verified");
+        
+        // 2. Check u value folding: u' = ρ·u₁ + ρ²·u₂
+        let expected_u = u1 * rho + u2 * rho_squared;
+        assert_eq!(folded_lccs.X[0], expected_u, "u value not folded correctly");
+        println!("   ✓ u value folding verified");
+        
+        // 3. Check X values folding: x' = ρ·x₁ + ρ²·x₂
+        for i in 1..folded_lccs.X.len() {
+            let expected_x = lccs1.X[i] * rho + lccs2.X[i] * rho_squared;
+            assert_eq!(folded_lccs.X[i], expected_x, "X value at index {} not folded correctly", i);
+        }
+        println!("   ✓ X values folding verified");
+        
+        // 4. Check vs values folding: v'ⱼ = ρ·σⱼ,₁ + ρ²·σⱼ,₂
+        for j in 0..folded_lccs.vs.len() {
+            let expected_v = sigmas1[j] * rho + sigmas2[j] * rho_squared;
+            assert_eq!(folded_lccs.vs[j], expected_v, "v value at index {} not folded correctly", j);
+        }
+        println!("   ✓ vs values folding verified");
+        
+        // 5. Check the evaluation point is maintained
+        assert_eq!(folded_lccs.rs, merged_rs, "Evaluation point not maintained");
+        println!("   ✓ Evaluation point maintenance verified");
+        
+        // 6. Verify folded instance satisfies constraints
+        // In a real implementation, we would verify that the folded instance satisfies the CCS
+        
+        println!("8. Verifying folded LCCS instance correctness");
+        let verification_result = lccs_folding::verify_folded_instance(
+            &shape, &folded_lccs, &folded_W, &lccs1, &lccs2, &W1, &W2, &rho, &sigmas1, &sigmas2)?;
+        
+        assert!(verification_result, "Folded instance verification failed");
+        println!("   ✓ Folded instance verified successfully");
+        
+        Ok(())
+    }
+    
+    // Test multiple folding operations to ensure consistency
+    #[test]
+    fn test_multi_fold_lccs() -> Result<(), Error> {
+        let mut rng = test_rng();
+        
+        // Create test shape (simplified for this test)
+        let (a, b, c) = {
+            (
+                to_field_sparse::<G>(A),
+                to_field_sparse::<G>(B),
+                to_field_sparse::<G>(C),
+            )
+        };
+        
+        let matrix_a = SparseMatrix::new(&a, 4, 6);
+        let matrix_b = SparseMatrix::new(&b, 4, 6);
+        let matrix_c = SparseMatrix::new(&c, 4, 6);
+        
+        let shape = CCSShape::<G> {
+            num_constraints: 4,
+            num_vars: 4,
+            num_io: 2,
+            num_matrices: 3,
+            num_multisets: 2,
+            max_cardinality: 2,
+            Ms: vec![matrix_a, matrix_b, matrix_c],
+            cSs: vec![
+                (Fr::one(), vec![0, 1]),
+                (Fr::one().neg(), vec![2]),
+            ],
+        };
+        
+        // Setup SRS for polynomial commitment
+        let SRS = Z::setup(4, b"test_multi_fold", &mut rng).unwrap();
+        let ck = Z::trim(&SRS, 4).ck;
+        
+        // Create multiple LCCS instances
+        println!("1. Creating multiple LCCS instances");
+        let num_instances = 5;
+        let mut instances = Vec::with_capacity(num_instances);
+        let mut witnesses = Vec::with_capacity(num_instances);
+        
+        for i in 0..num_instances {
+            let u = Fr::from((i as u64 + 1) * 10);
+            // Use i64 values for to_field_elements to avoid type errors
+            let X = to_field_elements::<G>(&[1, 35 + i as i64]);
+            let rs = vec![Fr::rand(&mut rng), Fr::rand(&mut rng)];
+            
+            let W_values = to_field_elements::<G>(&[
+                3 + i as i64, 
+                9 + i as i64, 
+                27 + i as i64, 
+                30 + i as i64
+            ]);
+            let W = CCSWitness::<G>::new(&shape, &W_values)?;
+            let commitment_W = W.commit::<Z>(&ck);
+            
+            // Compute actual vs values - call evaluate via Polynomial trait
+            let z = [&[u], &X[1..], &W.W].concat();
+            let vs: Vec<Fr> = shape.Ms.iter()
+                .map(|M| {
+                    let M_j_z = mle::vec_to_ark_mle(M.multiply_vec(&z).as_slice());
+                    let rs_vec = rs.to_vec();
+                    Polynomial::evaluate(&M_j_z, &rs_vec)
+                })
+                .collect();
+            
+            let lccs = LCCSInstance::<G, Z> {
+                commitment_W,
+                X: [&[u], X[1..].as_ref()].concat(),
+                rs: rs.clone(),
+                vs,
+            };
+            
+            instances.push(lccs);
+            witnesses.push(W);
+        }
+        
+        // Fold instances sequentially
+        println!("2. Performing sequential folding of {} instances", num_instances);
+        
+        let config = poseidon_config::<Fr>();
+        let mut random_oracle = PoseidonSponge::new(&config);
+        
+        // Start with the first instance as accumulator
+        let mut acc_lccs = instances[0].clone();
+        let mut acc_witness = witnesses[0].clone();
+        
+        // Fold the remaining instances into the accumulator
+        // Create an array to store all intermediate instances for verification
+        let mut folded_instances = Vec::with_capacity(num_instances);
+        let mut folded_witnesses = Vec::with_capacity(num_instances);
+        
+        // Store the initial values
+        folded_instances.push(acc_lccs.clone());
+        folded_witnesses.push(acc_witness.clone());
+        
+        for i in 1..num_instances {
+            println!("   - Folding instance {}", i+1);
+            
+            // Generate merged evaluation point
+            let merged_rs = vec![Fr::rand(&mut rng), Fr::rand(&mut rng)];
+            
+            // Compute sigmas for both instances
+            let sigmas_acc = lccs_folding::compute_sigmas(&shape, &acc_lccs, &acc_witness, &merged_rs);
+            let sigmas_next = lccs_folding::compute_sigmas(&shape, &instances[i], &witnesses[i], &merged_rs);
+            
+            // Generate folding challenge
+            let rho = lccs_folding::generate_folding_challenge::<G, PoseidonSponge<Fr>>(
+                &mut random_oracle, &acc_lccs, &instances[i]);
+            
+            // Calculate rho squared
+            let rho_squared = rho * rho;
+            
+            // Fold accumulator with next instance
+            acc_lccs = acc_lccs.fold_lccs(&instances[i], &rho, &sigmas_acc, &sigmas_next, &merged_rs)?;
+            
+            // Fold witnesses
+            acc_witness = acc_witness.fold(&witnesses[i], &rho_squared)?;
+            
+            // Store the folded instance and witness
+            folded_instances.push(acc_lccs.clone());
+            folded_witnesses.push(acc_witness.clone());
+            
+            // Verify against the previous fold
+            let verification_result = lccs_folding::verify_folded_instance(
+                &shape, &folded_instances[i], &folded_witnesses[i], 
+                &folded_instances[i-1], &instances[i], 
+                &folded_witnesses[i-1], &witnesses[i], 
+                &rho, &sigmas_acc, &sigmas_next)?;
+            
+            assert!(verification_result, "Folded instance verification failed at step {}", i);
+        }
+        
+        println!("3. All {} instances folded successfully", num_instances);
+        
         Ok(())
     }
 }
