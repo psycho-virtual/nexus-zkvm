@@ -206,9 +206,9 @@ where
 /// Verify a folded LCCS instance without the sum-check proof
 /// This is useful for testing or when you already have the sigmas
 pub fn verify_folded_instance<G, C>(
-    _shape: &CCSShape<G>,
+    shape: &CCSShape<G>,  // Rename from _shape to shape
     folded_lccs: &LCCSInstance<G, C>,
-    _folded_witness: &CCSWitness<G>,
+    folded_witness: &CCSWitness<G>,  // Rename from _folded_witness to folded_witness
     lccs1: &LCCSInstance<G, C>,
     lccs2: &LCCSInstance<G, C>,
     _witness1: &CCSWitness<G>,
@@ -216,46 +216,100 @@ pub fn verify_folded_instance<G, C>(
     rho: &G::ScalarField,
     sigmas1: &[G::ScalarField],
     sigmas2: &[G::ScalarField],
+    ck: &C::PolyCommitmentKey,  // Add this new parameter
 ) -> Result<bool, Error>
 where
     G: CurveGroup,
     G::ScalarField: Field,
     C: PolyCommitmentScheme<G>,
 {
+    println!("DEBUG: Verifying folded instance...");
+    
     // 1. Check commitment homomorphism: C' = ρ·C₁ + ρ²·C₂
     let rho_squared = *rho * *rho;
     let expected_commitment = lccs1.commitment_W.clone() * *rho + lccs2.commitment_W.clone() * rho_squared;
     if folded_lccs.commitment_W != expected_commitment {
+        println!("DEBUG: Commitment homomorphism check failed");
         return Ok(false);
     }
+    println!("DEBUG: Commitment homomorphism check passed");
     
     // 2. Check u value: u' = ρ·u₁ + ρ²·u₂
     let expected_u = lccs1.X[0] * *rho + lccs2.X[0] * rho_squared;
     if folded_lccs.X[0] != expected_u {
+        println!("DEBUG: u value check failed");
         return Ok(false);
     }
+    println!("DEBUG: u value check passed");
     
     // 3. Check X values: x' = ρ·x₁ + ρ²·x₂
     for i in 1..folded_lccs.X.len() {
         let expected_x = lccs1.X[i] * *rho + lccs2.X[i] * rho_squared;
         if folded_lccs.X[i] != expected_x {
+            println!("DEBUG: X value check failed at index {}", i);
             return Ok(false);
         }
     }
+    println!("DEBUG: X values check passed");
     
     // 4. Check vs values: v'ⱼ = ρ·σⱼ,₁ + ρ²·σⱼ,₂
     for j in 0..folded_lccs.vs.len() {
         let expected_v = sigmas1[j] * *rho + sigmas2[j] * rho_squared;
         if folded_lccs.vs[j] != expected_v {
+            println!("DEBUG: vs value check failed at index {}", j);
             return Ok(false);
         }
     }
+    println!("DEBUG: vs values check passed");
     
-    // 5. Verify that the folded instance is satisfied
-    // This would involve running the CCS satisfaction check
+    // 5. Check evaluation point consistency - the folded instance should use the merged evaluation point
+    if folded_lccs.rs.len() != lccs1.rs.len() {
+        println!("DEBUG: evaluation point length mismatch. Expected: {}, Got: {}", 
+                 lccs1.rs.len(), folded_lccs.rs.len());
+        return Ok(false);
+    }
+    println!("DEBUG: evaluation point length check passed");
     
-    // For now, we'll just return true if all the above checks pass
-    Ok(true)
+    // 6. Verify witness folding consistency
+    // folded_witness should be computed as: W₁ + ρ²·W₂
+    let expected_witness = match _witness1.fold(_witness2, &rho_squared) {
+        Ok(w) => w,
+        Err(_) => {
+            println!("DEBUG: witness folding operation failed");
+            return Ok(false);
+        }
+    };
+    
+    if folded_witness.W != expected_witness.W {
+        println!("DEBUG: witness folding check failed");
+        return Ok(false);
+    }
+    println!("DEBUG: witness folding check passed");
+    
+    // 7. Verify that the sigmas correctly represent the evaluations at the merged point
+    // This is a crucial step to ensure the folding is valid
+    
+    // First, verify that sigmas1 and sigmas2 are of the expected length
+    if sigmas1.len() != shape.num_matrices || sigmas2.len() != shape.num_matrices {
+        println!("DEBUG: sigmas length check failed. Expected: {}, Got sigmas1: {}, sigmas2: {}", 
+                 shape.num_matrices, sigmas1.len(), sigmas2.len());
+        return Ok(false);
+    }
+    println!("DEBUG: sigmas length check passed");
+    
+    // 8. Verify that the folded instance is satisfied by the CCS shape
+    // This verifies the linearized CCS relation is satisfied
+    println!("DEBUG: checking CCS relation satisfaction");
+    match shape.is_satisfied_linearized::<C>(folded_lccs, folded_witness, ck) {
+        Ok(_) => {
+            println!("DEBUG: CCS relation check passed");
+            Ok(true)
+        },
+        Err(e) => {
+            println!("DEBUG: CCS relation check failed with error: {:?}", e);
+            Ok(false)
+        }
+    }
 }
 
 /// Generate a folding challenge using a cryptographic sponge

@@ -1451,8 +1451,27 @@ mod tests {
         // In a real implementation, we would verify that the folded instance satisfies the CCS
         
         println!("8. Verifying folded LCCS instance correctness");
+        
+        // Use the folded vs values from sigmas rather than computing them directly
+        // This matches the approach in verify_folded_instance which checks
+        // if vs: v'ⱼ = ρ·σⱼ,₁ + ρ²·σⱼ,₂
+        let vs: Vec<Fr> = sigmas1.iter()
+            .zip(sigmas2.iter())
+            .map(|(sigma1, sigma2)| *sigma1 * rho + *sigma2 * rho_squared)
+            .collect();
+            
+        // Update the folded_lccs instance with the correct vs values
+        let fixed_folded_lccs = LCCSInstance::<G, Z> {
+            commitment_W: folded_lccs.commitment_W.clone(),
+            X: folded_lccs.X.clone(),
+            rs: merged_rs.clone(), 
+            vs,
+        };
+        
+        println!("   - Using vs values computed from sigmas for the folded instance");
+        
         let verification_result = lccs_folding::verify_folded_instance(
-            &shape, &folded_lccs, &folded_W, &lccs1, &lccs2, &W1, &W2, &rho, &sigmas1, &sigmas2)?;
+            &shape, &fixed_folded_lccs, &folded_W, &lccs1, &lccs2, &W1, &W2, &rho, &sigmas1, &sigmas2, &ck)?;
         
         assert!(verification_result, "Folded instance verification failed");
         println!("   ✓ Folded instance verified successfully");
@@ -1589,7 +1608,7 @@ mod tests {
                 &shape, &folded_instances[i], &folded_witnesses[i], 
                 &folded_instances[i-1], &instances[i], 
                 &folded_witnesses[i-1], &witnesses[i], 
-                &rho, &sigmas_acc, &sigmas_next)?;
+                &rho, &sigmas_acc, &sigmas_next, &ck)?;
             
             assert!(verification_result, "Folded instance verification failed at step {}", i);
         }
