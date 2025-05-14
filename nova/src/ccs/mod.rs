@@ -397,17 +397,26 @@ impl<G: CurveGroup, C: PolyCommitmentScheme<G>> LCCSInstance<G, C> {
         let (u1, X1) = (&uX1[0], &uX1[1..]);
         let X2 = &oX2[1..];
 
-        let commitment_W = comm_W1 + comm_W2 * *rho;
+        // Calculate rho^2 for second instance weight
+        let rho_squared = *rho * *rho;
 
-        let u = [*u1 + *rho];
+        // Fold commitment: C' = ρ·C₁ + ρ²·C₂
+        let commitment_W = comm_W1 * *rho + comm_W2 * rho_squared;
+
+        // Fold u value: u' = ρ·u₁ + ρ²·u₂
+        let u2 = oX2[0];  // Get the u value from the second instance
+        let u = [*u1 * *rho + u2 * rho_squared];
+        
+        // Fold X values: x' = ρ·x₁ + ρ²·x₂
         let X: Vec<G::ScalarField> = ark_std::cfg_iter!(X1)
             .zip(X2)
-            .map(|(a, b)| *a + *b * *rho)
+            .map(|(a, b)| *a * *rho + *b * rho_squared)
             .collect();
 
+        // Fold evaluation targets: v'ⱼ = ρ·σⱼ,₁ + ρ²·σⱼ,₂
         let vs: Vec<G::ScalarField> = ark_std::cfg_iter!(sigmas)
             .zip(thetas)
-            .map(|(sigma, theta)| *sigma + *theta * *rho)
+            .map(|(sigma, theta)| *sigma * *rho + *theta * rho_squared)
             .collect();
 
         Ok(Self {
@@ -1292,10 +1301,14 @@ mod tests {
             .map(|M| vec_to_mle(M.multiply_vec(&z2).as_slice()).evaluate::<G>(rs2.as_slice()))
             .collect();
 
+        // For LCCSInstance::fold, the folding formula uses rho directly
         let folded_instance = U1.fold(&U2, &rho, &rs2, &sigmas, &thetas)?;
 
+        // For Witness folding, we need to supply rho directly since CCSWitness::fold 
+        // uses the formula: W' = rho * W1 + rho^2 * W2
         let witness = W1.fold(&W2, &rho)?;
-
+        
+        // Verify that the folded instance satisfies the constraints
         ccs_shape.is_satisfied_linearized(&folded_instance, &witness, &ck)?;
         Ok(())
     }

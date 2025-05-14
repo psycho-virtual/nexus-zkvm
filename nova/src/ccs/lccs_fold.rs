@@ -385,9 +385,9 @@ where
     // 6. Fold the instances using quadratic weighting: ρ·C₁ + ρ²·C₂
     let folded_lccs = lccs1.fold_lccs(lccs2, &rho, &sigmas1, &sigmas2, &merged_rs)?;
     
-    // 7. Fold the witnesses using the witness folding formula: W₁ + ρ²·W₂
-    let rho_squared = rho * rho;
-    let folded_witness = witness1.fold(witness2, &rho_squared)?;
+    // 7. Fold the witnesses using the witness folding formula: ρ·W₁ + ρ²·W₂
+    // Pass rho directly to fold (not rho_squared) since the fold method applies rho to W1 and rho^2 to W2
+    let folded_witness = witness1.fold(witness2, &rho)?;
     
     // 8. Create and return the proof
     let proof = LCCSFoldingProof {
@@ -602,9 +602,9 @@ mod tests {
         let rho_squared = rho * rho;
         
         for i in 0..folded_witness.W.len() {
-            // The folding is done with W1.fold(&W2, &rho_squared)
-            // Which uses: W1[i] + rho_squared * W2[i]
-            let expected_w = W1.W[i] + W2.W[i] * rho_squared;
+            // The folding is done with W1.fold(&W2, &rho)
+            // Which uses: rho * W1[i] + rho_squared * W2[i]
+            let expected_w = W1.W[i] * rho + W2.W[i] * rho_squared;
             assert_eq!(folded_witness.W[i], expected_w, 
                       "Witness element {} mismatch", i);
         }

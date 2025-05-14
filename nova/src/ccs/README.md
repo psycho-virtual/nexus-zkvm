@@ -89,7 +89,7 @@ The module includes comprehensive tests for all functionality. To run these test
 cargo test --package nexus-nova --lib ccs
 
 # Run specific test file
-cargo test --package nexus-nova --lib ccs::lccs_folding
+cargo test --package nexus-nova --lib ccs::lccs_fold
 
 # Run a specific test
 cargo test --package nexus-nova --lib ccs::tests::test_fold_lccs
