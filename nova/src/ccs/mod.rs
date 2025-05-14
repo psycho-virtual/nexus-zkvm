@@ -18,7 +18,7 @@ use super::{absorb::AbsorbEmulatedFp, r1cs::R1CSShape};
 use mle::vec_to_mle;
 
 pub mod mle;
-pub mod lccs_folding;
+pub mod lccs_fold;
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum Error {
@@ -1421,7 +1421,7 @@ mod tests {
         let mut random_oracle = PoseidonSponge::new(&config);
         
         // Generate gamma challenge for the sumcheck polynomial weighting
-        let gamma = lccs_folding::generate_gamma_challenge::<G, PoseidonSponge<Fr>>(&mut random_oracle);
+        let gamma = lccs_fold::generate_gamma_challenge::<G, PoseidonSponge<Fr>>(&mut random_oracle);
         println!("   - Generated gamma challenge for polynomial weighting");
         
         // In a real implementation, we would now execute the sum-check protocol
@@ -1455,7 +1455,7 @@ mod tests {
         println!("   - Computed {} sigma values for instance 2", sigmas2.len());
         
         // Generate folding challenge
-        let rho = lccs_folding::generate_folding_challenge::<G, PoseidonSponge<Fr>>(
+        let rho = lccs_fold::generate_folding_challenge::<G, PoseidonSponge<Fr>>(
             &mut random_oracle, &lccs1, &lccs2);
         println!("5. Generated folding challenge rho");
         
@@ -1588,7 +1588,7 @@ mod tests {
         // 5. Output computed witness values for comparison
         println!("DEBUG: Manual rho*W1 + rho^2*W2 (size={}): {:?}", manual_W.len(), manual_W.iter().take(3).collect::<Vec<_>>());
         
-        let verification_result = lccs_folding::verify_folded_instance(
+        let verification_result = lccs_fold::verify_folded_instance(
             &shape, &fixed_folded_lccs, &folded_W, &lccs1, &lccs2, &W1, &W2, &rho, &sigmas1, &sigmas2, &ck)?;
         
         assert!(verification_result, "Folded instance verification failed");
@@ -1701,11 +1701,11 @@ mod tests {
             let merged_rs = vec![Fr::rand(&mut rng), Fr::rand(&mut rng)];
             
             // Compute sigmas for both instances
-            let sigmas_acc = lccs_folding::compute_sigmas(&shape, &acc_lccs, &acc_witness, &merged_rs);
-            let sigmas_next = lccs_folding::compute_sigmas(&shape, &instances[i], &witnesses[i], &merged_rs);
+            let sigmas_acc = lccs_fold::compute_sigmas(&shape, &acc_lccs, &acc_witness, &merged_rs);
+            let sigmas_next = lccs_fold::compute_sigmas(&shape, &instances[i], &witnesses[i], &merged_rs);
             
             // Generate folding challenge
-            let rho = lccs_folding::generate_folding_challenge::<G, PoseidonSponge<Fr>>(
+            let rho = lccs_fold::generate_folding_challenge::<G, PoseidonSponge<Fr>>(
                 &mut random_oracle, &acc_lccs, &instances[i]);
             
             // No need for rho_squared anymore since we're using rho directly in the witness folding
@@ -1721,7 +1721,7 @@ mod tests {
             folded_witnesses.push(acc_witness.clone());
             
             // Verify against the previous fold
-            let verification_result = lccs_folding::verify_folded_instance(
+            let verification_result = lccs_fold::verify_folded_instance(
                 &shape, &folded_instances[i], &folded_witnesses[i], 
                 &folded_instances[i-1], &instances[i], 
                 &folded_witnesses[i-1], &witnesses[i], 
