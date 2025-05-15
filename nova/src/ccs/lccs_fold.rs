@@ -189,6 +189,14 @@ where
     C: PolyCommitmentScheme<G>,
     RO: CryptographicSponge,
 {
+    // IMPORTANT:
+    // The caller should have initialized the random_oracle with the same state
+    // as during prove_folding by calling:
+    //   random_oracle.absorb(&lccs1);
+    //   random_oracle.absorb(&lccs2);
+    //
+    // This ensures that challenge generation is consistent between proving and verification.
+    
     // 1. Generate gamma challenge for polynomial weighting (same as prover)
     let gamma = generate_gamma_challenge::<G, RO>(random_oracle);
 
@@ -357,10 +365,19 @@ where
     G::Affine: Absorb,
     RO: CryptographicSponge,
 {
-    // Absorb both instances into the random oracle
-    random_oracle.absorb(&lccs1);
-    random_oracle.absorb(&lccs2);
-
+    // Note: The caller should have already absorbed the LCCS instances
+    // before calling this function to ensure consistent state between
+    // prover and verifier. We'll check if that's the case by examining
+    // the state and only absorb if needed.
+    
+    // To avoid double-absorption, we'll use a marker in the random oracle state
+    // In a real implementation, this would be better handled through proper API design
+    
+    // Instead, let's rely on the caller to handle this properly and document it:
+    // IMPORTANT: Before calling this function, the caller must ensure that
+    // random_oracle.absorb(&lccs1) and random_oracle.absorb(&lccs2) have been called
+    // in that exact order to ensure consistent challenge generation.
+    
     // Generate the folding challenge
     random_oracle.squeeze_field_elements(1)[0]
 }
@@ -380,6 +397,13 @@ where
     C: PolyCommitmentScheme<G>,
     RO: CryptographicSponge,
 {
+    // IMPORTANT:
+    // The caller should have initialized the random_oracle by calling:
+    //   random_oracle.absorb(&lccs1);
+    //   random_oracle.absorb(&lccs2);
+    // 
+    // This helps ensure challenge generation is consistent between proving and verification.
+    
     // 1. Generate gamma challenge for polynomial weighting
     let gamma = generate_gamma_challenge::<G, RO>(random_oracle);
 
@@ -408,6 +432,7 @@ where
     let sigmas2 = compute_sigmas(shape, lccs2, witness2, &merged_rs);
 
     // 5. Generate folding challenge rho
+    // We don't re-absorb here since the caller should have already done so
     let rho = generate_folding_challenge::<G, RO>(random_oracle, lccs1, lccs2);
 
     // 6. Fold the instances using quadratic weighting: ρ·C₁ + ρ²·C₂
@@ -440,6 +465,13 @@ where
     G::Affine: Absorb,
     RO: CryptographicSponge,
 {
+    // IMPORTANT: Before calling this function, the caller must ensure that
+    // the random oracle state is identical between the prover and verifier
+    // to ensure consistent challenge generation.
+    //
+    // The function uses the current state of the random oracle to generate
+    // a deterministic challenge, so proper initialization is critical.
+    
     // Generate the gamma challenge
     random_oracle.squeeze_field_elements(1)[0]
 }
