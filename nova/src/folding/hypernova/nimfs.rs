@@ -269,7 +269,7 @@ pub(crate) mod tests {
         short_weierstrass::{Projective, SWCurveConfig},
         AdditiveGroup,
     };
-    use ark_std::{test_rng, UniformRand};
+    use ark_std::{test_rng, UniformRand, Zero};
     use ark_test_curves::bls12_381::{g1::Config as G, Bls12_381 as E};
 
     type Z = Zeromorph<E>;
@@ -277,6 +277,11 @@ pub(crate) mod tests {
     #[test]
     fn prove_verify_as_subprotocol() {
         prove_verify_as_subprotocol_with_curve::<G, Z>().unwrap()
+    }
+    
+    #[test]
+    fn test_full_folding() {
+        test_full_folding_with_curve::<G, Z>().unwrap()
     }
 
     fn prove_verify_as_subprotocol_with_curve<G, C>() -> Result<(), Error>
@@ -287,12 +292,30 @@ pub(crate) mod tests {
         C: PolyCommitmentScheme<Projective<G>>,
         C::PolyCommitmentKey: Clone,
     {
+        println!("\n==== NIMFS FOLDING PROVER TEST ====");
+        println!("\nThis test demonstrates a complete NIMFS folding operation with timings\n");
+        
+        // Start timing the setup
+        println!("1. Configuration:");
+        let start_setup = ark_std::time::Instant::now();
+        
         let config = poseidon_config::<G::ScalarField>();
-
         let mut rng = test_rng();
 
+        println!("   - Using BLS12-381 elliptic curve");
+        println!("   - Using Poseidon sponge for random oracle");
+        
+        // Setup test CCS
+        println!("\n2. Setting up test environment...");
         let (shape, U2, W2, ck) = setup_test_ccs::<G, C>(3, None, Some(&mut rng));
+        
+        println!("   - Constraint system shape:");
+        println!("     - {} constraints", shape.num_constraints);
+        println!("     - {} witness variables", shape.num_vars);
+        println!("     - {} IO variables", shape.num_io);
+        println!("     - {} matrices", shape.num_matrices);
 
+        // Create first instance (linearized CCS)
         let X = to_field_elements::<Projective<G>>((vec![0; shape.num_io]).as_slice());
         let W1 = CCSWitness::zero(&shape);
 
@@ -307,6 +330,10 @@ pub(crate) mod tests {
                 vec_to_mle(M.multiply_vec(&z).as_slice()).evaluate::<Projective<G>>(rs.as_slice())
             })
             .collect();
+        
+        println!("   - Created LCCS instance (instance 1)");
+        println!("   - Created standard CCS instance (instance 2)");
+        println!("   - Setup completed in: {:?}", start_setup.elapsed());
 
         let U1 = LCCSInstance::<Projective<G>, C>::new(
             &shape,
@@ -317,8 +344,12 @@ pub(crate) mod tests {
         )?;
 
         let vk = G::ScalarField::ZERO;
+        
+        // First folding operation
+        println!("\n3. Executing first NIMFS folding operation...");
+        let start_prove1 = ark_std::time::Instant::now();
+        
         let mut random_oracle = PoseidonSponge::new(&config);
-
         let (proof, (folded_U, folded_W), _rho) =
             NIMFSProof::<Projective<G>, PoseidonSponge<G::ScalarField>>::prove_as_subprotocol(
                 &mut random_oracle,
@@ -327,18 +358,40 @@ pub(crate) mod tests {
                 (&U1, &W1),
                 (&U2, &W2),
             )?;
-
+        
+        let prove_time1 = start_prove1.elapsed();
+        println!("   - Folding prover completed in: {:?}", prove_time1);
+        
+        println!("\n4. Verifying first folding...");
+        let start_verify1 = ark_std::time::Instant::now();
+        
         let mut random_oracle = PoseidonSponge::new(&config);
         let (v_folded_U, _rho) =
             proof.verify_as_subprotocol(&mut random_oracle, &vk, &shape, &U1, &U2)?;
+        
+        let verify_time1 = start_verify1.elapsed();
+        println!("   - Verification completed in: {:?}", verify_time1);
+        
         assert_eq!(folded_U, v_folded_U);
-
         shape.is_satisfied_linearized(&folded_U, &folded_W, &ck)?;
+        
+        println!("\n5. First fold results:");
+        println!("   - Proof details:");
+        println!("     - Sumcheck proof with {} messages", proof.sumcheck_proof.len());
+        println!("     - {} sigma values and {} theta values", proof.sigmas.len(), proof.thetas.len());
+        
+        // Second folding operation with folded instance
+        println!("\n6. Setting up second folding operation...");
+        println!("   - Using the folded instance as the new first instance");
+        println!("   - Creating a new second instance with different witness");
 
         let U1 = folded_U;
         let W1 = folded_W;
 
         let (_, U2, W2, _) = setup_test_ccs(5, Some(&ck), Some(&mut rng));
+        
+        println!("\n7. Executing second NIMFS folding operation...");
+        let start_prove2 = ark_std::time::Instant::now();
 
         let mut random_oracle = PoseidonSponge::new(&config);
         let (proof, (folded_U, folded_W), _rho) = NIMFSProof::prove_as_subprotocol(
@@ -348,14 +401,183 @@ pub(crate) mod tests {
             (&U1, &W1),
             (&U2, &W2),
         )?;
+        
+        let prove_time2 = start_prove2.elapsed();
+        println!("   - Second folding completed in: {:?}", prove_time2);
+        
+        println!("\n8. Verifying second folding...");
+        let start_verify2 = ark_std::time::Instant::now();
 
         let mut random_oracle = PoseidonSponge::new(&config);
         let (v_folded_U, _rho) =
             proof.verify_as_subprotocol(&mut random_oracle, &vk, &shape, &U1, &U2)?;
+        
+        let verify_time2 = start_verify2.elapsed();
+        println!("   - Second verification completed in: {:?}", verify_time2);
+        
         assert_eq!(folded_U, v_folded_U);
-
         shape.is_satisfied_linearized(&folded_U, &folded_W, &ck)?;
-
+        
+        println!("\n9. Summary of NIMFS folding operations:");
+        println!("   - Successfully folded three instances into one");
+        println!("   - First folding time: {:?}", prove_time1);
+        println!("   - Second folding time: {:?}", prove_time2);
+        println!("   - Total folding time: {:?}", prove_time1 + prove_time2);
+        
+        println!("\n==== TEST COMPLETED SUCCESSFULLY ====");
+        
+        Ok(())
+    }
+    
+    // Comparable benchmark to the lattice folding test
+    fn test_full_folding_with_curve<G, C>() -> Result<(), Error>
+    where
+        G: SWCurveConfig,
+        G::BaseField: PrimeField + Absorb,
+        G::ScalarField: Absorb,
+        C: PolyCommitmentScheme<Projective<G>>,
+        C::PolyCommitmentKey: Clone,
+    {
+        // We'll use a simpler test here to match the latticefold test format
+        // but with the existing setup_test_ccs function which works with this codebase
+        
+        println!("\n==== FOLDING PROVER TEST ====");
+        println!("\nThis test demonstrates a complete folding operation with timings\n");
+        
+        // Start timing the setup
+        println!("1. Configuration:");
+        let start_setup = ark_std::time::Instant::now();
+        
+        let config = poseidon_config::<G::ScalarField>();
+        let mut rng = test_rng();
+        
+        println!("   - Using BLS12-381 elliptic curve");
+        println!("   - Using Poseidon sponge for random oracle");
+        
+        // Setup test CCS with larger dimensions
+        let (shape, _, _, ck) = setup_test_ccs::<G, C>(24, None, Some(&mut rng));
+        
+        println!("   - Matrix dimensions: C={} rows, W={} columns", 
+                 shape.num_constraints, shape.num_vars + shape.num_io);
+        
+        println!("   - Setup completed in: {:?}", start_setup.elapsed());
+        
+        // Generate multiple instances to fold (12 as in the latticefold test)
+        println!("\n2. Generated 12 LCCCS instances to fold");
+        println!("   - Each with {} witness elements", shape.num_vars);
+        println!("   - Constraint system with {} constraints", shape.num_constraints);
+        
+        let num_instances = 12;
+        let mut all_instances = Vec::with_capacity(num_instances);
+        let mut all_witnesses = Vec::with_capacity(num_instances);
+        
+        // Create the initial instances - using setup_test_ccs for each instance to ensure they're valid
+        for i in 0..num_instances {
+            // Create valid CCS instance using the setup function
+            let (_, U_i, W_i, _) = setup_test_ccs::<G, C>(3 + (i % 3) as u64, Some(&ck), Some(&mut rng));
+            
+            // Extract and create random evaluation point for LCCS
+            let rs: Vec<G::ScalarField> = (0..safe_loglike!(shape.num_constraints))
+                .map(|_| G::ScalarField::rand(&mut rng))
+                .collect();
+            
+            let z = [U_i.X.as_slice(), W_i.W.as_slice()].concat();
+            let vs: Vec<G::ScalarField> = ark_std::cfg_iter!(&shape.Ms)
+                .map(|M| {
+                    vec_to_mle(M.multiply_vec(&z).as_slice()).evaluate::<Projective<G>>(rs.as_slice())
+                })
+                .collect();
+            
+            // Create LCCS instance
+            let lccs_instance = LCCSInstance::<Projective<G>, C>::new(
+                &shape,
+                &U_i.commitment_W,
+                &U_i.X,
+                rs.as_slice(),
+                vs.as_slice(),
+            )?;
+            
+            all_instances.push(lccs_instance);
+            all_witnesses.push(W_i);
+        }
+        
+        // Folding operation
+        println!("\n3. Executing folding operation...");
+        let start_folding = ark_std::time::Instant::now();
+        
+        let vk = G::ScalarField::zero();
+        
+        // Track all generated proofs
+        let mut all_proofs = Vec::with_capacity(num_instances-1);
+        let mut all_sigmas = Vec::with_capacity(num_instances-1);
+        let mut all_thetas = Vec::with_capacity(num_instances-1);
+        
+        // First instance is our accumulator
+        let mut folded_U = all_instances[0].clone();
+        let mut folded_W = all_witnesses[0].clone();
+        
+        // Fold all remaining instances into the accumulator
+        for i in 1..num_instances {
+            let mut random_oracle = PoseidonSponge::new(&config);
+            
+            // Convert next instance to CCSInstance since we're folding LCCS+CCS
+            let next_instance = crate::ccs::CCSInstance::<Projective<G>, C>::new(
+                &shape,
+                &all_instances[i].commitment_W,
+                &all_instances[i].X,
+            )?;
+            
+            let next_witness = &all_witnesses[i];
+            
+            // Fold the current accumulator with the next instance
+            let (proof, (new_folded_U, new_folded_W), _rho) =
+                NIMFSProof::<Projective<G>, PoseidonSponge<G::ScalarField>>::prove_as_subprotocol(
+                    &mut random_oracle,
+                    &vk,
+                    &shape,
+                    (&folded_U, &folded_W),
+                    (&next_instance, next_witness),
+                )?;
+            
+            // Update accumulator
+            folded_U = new_folded_U;
+            folded_W = new_folded_W;
+            
+            // Track the proof data
+            all_proofs.push(proof.sumcheck_proof.clone());
+            all_sigmas.push(proof.sigmas.clone());
+            all_thetas.push(proof.thetas.clone());
+        }
+        
+        let folding_time = start_folding.elapsed();
+        println!("   - Folding completed in: {:?}", folding_time);
+        
+        println!("\n4. Folding performed these operations:");
+        println!("   a. Generated gamma, beta challenges for each fold");
+        println!("   b. Constructed sumcheck polynomial for each instance pair");
+        println!("   c. Ran sumcheck protocol to prove polynomial identities");
+        println!("   d. Computed sigma and theta values for each fold");
+        println!("   e. Used rho challenge to combine instances");
+        
+        // Count the proof elements
+        let total_sigma_elements: usize = all_sigmas.iter().map(|v| v.len()).sum();
+        let total_theta_elements: usize = all_thetas.iter().map(|v| v.len()).sum();
+        
+        println!("\n5. Results:");
+        println!("   - Original statements: {} LCCCS instances", num_instances);
+        println!("   - Proof has:");
+        println!("     - Sumcheck proofs with randomness");
+        println!("     - {} sigma vectors", all_sigmas.len());
+        println!("     - {} theta vectors", all_thetas.len());
+        println!("     - Total sigma elements: {} values", total_sigma_elements);
+        println!("     - Total theta elements: {} values", total_theta_elements);
+        
+        // Verify the final folded instance
+        let satisfied = shape.is_satisfied_linearized(&folded_U, &folded_W, &ck).is_ok();
+        assert!(satisfied, "Final folded instance does not satisfy the constraint system");
+        
+        println!("\n==== TEST COMPLETED SUCCESSFULLY ====");
+        
         Ok(())
     }
 }

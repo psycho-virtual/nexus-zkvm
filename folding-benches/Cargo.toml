@@ -1,0 +1,38 @@
+[package]
+name = "folding-benches"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ark-ff = "0.5.0"
+ark-relations = { version = "0.5.0" }
+ark-r1cs-std = { version = "0.5.0" }
+ark-crypto-primitives = { version = "0.5.0", features = ["sponge"] }
+ark-ec = "0.5.0"
+ark-poly = "0.5.0"
+ark-std = "0.5.0"
+ark-serialize = "0.5.0"
+
+# Curves to use in benchmarks
+ark-bn254 = "0.5.0"
+ark-grumpkin = "0.5.0"
+ark-pallas = "0.5.0"
+ark-vesta = "0.5.0"
+
+# Main crate dependency
+nexus-nova = { path = "../nova", default-features = false }
+
+# Spartan for PolyCommitmentScheme trait
+ark-spartan = { path = "../spartan" }
+
+[features]
+default = ["parallel"]
+parallel = ["nexus-nova/parallel"]
+
+[[bin]]
+name = "accs_folding"
+path = "benches/accs_folding.rs"
+
+[[bin]]
+name = "nimfs_folding"
+path = "benches/nimfs_folding.rs"
