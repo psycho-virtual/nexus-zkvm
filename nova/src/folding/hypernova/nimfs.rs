@@ -64,11 +64,11 @@ impl ark_std::error::Error for Error {
 }
 
 pub struct NIMFSProof<G: CurveGroup, RO> {
-    pub(crate) sumcheck_proof: ml_sumcheck::Proof<G::ScalarField>,
-    pub(crate) poly_info: ml_sumcheck::PolynomialInfo,
-    pub(crate) sigmas: Vec<G::ScalarField>,
-    pub(crate) thetas: Vec<G::ScalarField>,
-    pub(crate) _random_oracle: PhantomData<RO>,
+    pub sumcheck_proof: ml_sumcheck::Proof<G::ScalarField>,
+    pub poly_info: ml_sumcheck::PolynomialInfo,
+    pub sigmas: Vec<G::ScalarField>,
+    pub thetas: Vec<G::ScalarField>,
+    pub _random_oracle: PhantomData<RO>,
 }
 
 impl<G: CurveGroup, RO> Clone for NIMFSProof<G, RO> {

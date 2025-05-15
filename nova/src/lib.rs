@@ -5,7 +5,7 @@
 #![allow(clippy::large_enum_variant)]
 
 mod absorb;
-mod provider;
+pub mod provider; // Making this public for our use
 mod sparse;
 mod utils;
 

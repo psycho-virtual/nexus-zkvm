@@ -4,7 +4,9 @@ use ark_ec::{pairing::Pairing, short_weierstrass::SWCurveConfig, CurveGroup};
 use ark_poly_commit::error::Error;
 use ark_spartan::dense_mlpoly::DensePolynomial;
 use ark_spartan::polycommitments::zeromorph::Zeromorph as SpartanZM;
-use ark_spartan::polycommitments::{error, PCSKeys, PolyCommitmentScheme};
+// Import for internal use and re-export for public use
+use ark_spartan::polycommitments::{error, PCSKeys};
+pub use ark_spartan::polycommitments::PolyCommitmentScheme;
 use ark_std::rand::RngCore;
 use merlin::Transcript;
 
@@ -12,7 +14,7 @@ use crate::LOG_TARGET;
 
 pub struct Zeromorph<E>(PhantomData<E>);
 
-impl<E> PolyCommitmentScheme<E::G1> for Zeromorph<E>
+impl<E> ark_spartan::polycommitments::PolyCommitmentScheme<E::G1> for Zeromorph<E>
 where
     E: Pairing,
     <<E as Pairing>::G1 as CurveGroup>::Config: SWCurveConfig,
