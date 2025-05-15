@@ -34,6 +34,7 @@ hex = { workspace = true }
 
 halo2_proofs = { git = "https://github.com/privacy-scaling-explorations/halo2.git", tag = "v2023_04_20" }
 halo2curves = { git = "https://github.com/privacy-scaling-explorations/halo2curves.git", rev = "8e4cb9f0c66c864e8ca25da07f50ae95f664a5b7" }
+either = "1.15.0"
 
 [features]
 default = ["parallel"]

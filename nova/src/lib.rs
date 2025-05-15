@@ -4,13 +4,13 @@
 #![allow(clippy::wrong_self_convention)]
 #![allow(clippy::large_enum_variant)]
 
-mod absorb;
+pub mod absorb;
 pub mod provider; // Making this public for our use
 mod sparse;
 mod utils;
 
 pub mod circuits;
-mod folding;
+pub mod folding; // Making folding module public
 mod gadgets;
 
 #[cfg(test)]
@@ -19,6 +19,7 @@ mod test_utils;
 pub mod ccs;
 pub mod commitment;
 pub mod r1cs;
+pub mod tree_folding;
 
 pub use circuits::{
     hypernova::{self}, // uses same StepCircuit trait as Nova
