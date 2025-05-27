@@ -19,6 +19,7 @@ use mle::vec_to_mle;
 
 pub mod mle;
 pub mod lccs_fold;
+pub mod linearization;
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum Error {
@@ -1434,7 +1435,7 @@ mod tests {
         let mut random_oracle = PoseidonSponge::new(&config);
         
         // Generate gamma challenge for the sumcheck polynomial weighting
-        let gamma = lccs_fold::generate_gamma_challenge::<G, PoseidonSponge<Fr>>(&mut random_oracle);
+        let _gamma = lccs_fold::generate_gamma_challenge::<G, PoseidonSponge<Fr>>(&mut random_oracle);
         println!("   - Generated gamma challenge for polynomial weighting");
         
         // In a real implementation, we would now execute the sum-check protocol

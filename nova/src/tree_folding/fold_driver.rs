@@ -43,7 +43,7 @@ where
 
     /// Convert the strict leaf instances into their accumulator form using
     /// `FoldReducer::strict_to_acc`.
-    fn strict_to_acc_level(&self, leaves: &[R::StrictInst]) -> Vec<R::AccInst> {
+    fn strict_to_acc_level(&self, leaves: &[R::StrictInst]) -> Result<Vec<R::AccInst>, R::Error> {
         debug_assert!(!leaves.is_empty());
 
         leaves
@@ -53,7 +53,7 @@ where
     }
 
     /// Fold one **accumulator** level into its parent level.
-    fn fold_next_level(&self, current: &[R::AccInst]) -> Vec<R::AccInst> {
+    fn fold_next_level(&self, current: &[R::AccInst]) -> Result<Vec<R::AccInst>, R::Error> {
         debug_assert!(!current.is_empty());
         debug_assert!(current.len() % K == 0);
 
@@ -64,16 +64,16 @@ where
             // Safety: chunks_exact guarantees that each chunk has exactly K elements
             let acc_array =
                 <&[R::AccInst; K]>::try_from(chunk).expect("chunks_exact guarantees len == K");
-            let (parent, _proof) = self.reducer.fold_acc_acc(acc_array);
+            let (parent, _proof) = self.reducer.fold_acc_acc(acc_array)?;
             next.push(parent);
         }
 
-        next
+        Ok(next)
     }
 
     /// Compute the root accumulator of a full batched fold.
     /// This function keeps only the current level in memory.
-    pub fn fold_root(&self, leaves: &[R::StrictInst]) -> R::AccInst {
+    pub fn fold_root(&self, leaves: &[R::StrictInst]) -> Result<R::AccInst, R::Error> {
         assert!(!leaves.is_empty(), "Input must not be empty");
         assert!(
             Self::len_is_power_of_k(leaves.len()),
@@ -83,14 +83,14 @@ where
         );
 
         // First level: strict → accumulator (one-to-one conversion)
-        let mut current_level = self.strict_to_acc_level(leaves);
+        let mut current_level = self.strict_to_acc_level(leaves)?;
 
         // Higher levels: accumulator → accumulator
         while current_level.len() > 1 {
-            current_level = self.fold_next_level(&current_level);
+            current_level = self.fold_next_level(&current_level)?;
         }
 
         debug_assert_eq!(current_level.len(), 1);
-        current_level.pop().unwrap()
+        Ok(current_level.pop().unwrap())
     }
 }

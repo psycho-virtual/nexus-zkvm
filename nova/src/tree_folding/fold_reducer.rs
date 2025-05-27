@@ -21,9 +21,12 @@ pub trait FoldReducer<const K: usize> {
     /// consumed by `verify_step`.
     type FoldProof;
 
+    /// Error type for folding operations
+    type Error;
+
     /// Fold K accumulator instances into a new accumulator instance and
     /// return the result together with a proof.
-    fn fold_acc_acc(&self, acc_children: &[Self::AccInst; K]) -> (Self::AccInst, Self::FoldProof);
+    fn fold_acc_acc(&self, acc_children: &[Self::AccInst; K]) -> Result<(Self::AccInst, Self::FoldProof), Self::Error>;
 
     /// Verify that `parent` was correctly derived from its (implicit) children
     /// using the supplied proof.
@@ -34,5 +37,5 @@ pub trait FoldReducer<const K: usize> {
     /// This is a convenience helper that allows callers (such as [`FoldDriver`]) to
     /// convert a batch of strict leaf instances into accumulator form before
     /// proceeding with higher‐level accumulator folds.
-    fn strict_to_acc(&self, strict: &Self::StrictInst) -> Self::AccInst;
+    fn strict_to_acc(&self, strict: &Self::StrictInst) -> Result<Self::AccInst, Self::Error>;
 }
