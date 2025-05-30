@@ -18,7 +18,7 @@ use ark_relations::r1cs::{ConstraintSystem, SynthesisError, SynthesisMode};
 use ark_spartan::polycommitments::PolyCommitmentScheme;
 
 use super::{
-    mle::vec_to_mle, CCSInstance, CCSShape, CCSWitness, Error, LCCSInstance,
+    mle::{vec_to_mle, vec_to_ark_mle}, CCSInstance, CCSShape, CCSWitness, Error, LCCSInstance,
 };
 use crate::{
     circuits::nova::StepCircuit,
@@ -151,9 +151,9 @@ where
 /// Linearizes a CCS instance into an LCCS instance using the sum-check protocol
 ///
 /// This implements the core linearization algorithm from the HyperNova paper:
-/// 1. Commit to the witness (already done in CCS instance)
-/// 2. Run interactive sum-check protocol on the CCS polynomial g(X)
-/// 3. Build linearized values from the sum-check cross-term evaluations
+/// 1. Sample challenges γ and β from the random oracle
+/// 2. Run interactive sum-check protocol on the Q(x) polynomial
+/// 3. Compute theta values from sum-check evaluations  
 /// 4. Output the LCCS instance
 ///
 /// # Arguments
@@ -181,28 +181,34 @@ where
     // Step 1: Verify the CCS instance is satisfied (optional check)
     shape.is_satisfied(instance, witness, ck)?;
 
-    // Step 2: Construct the CCS polynomial g(X) for sum-check
-    let z = [instance.X.as_slice(), witness.W.as_slice()].concat();
-    let polynomial = construct_ccs_polynomial(shape, &z)?;
+    // Step 2: Sample challenges from random oracle
+    // Sample γ ← F
+    let gamma: G::ScalarField = random_oracle.squeeze_field_elements(1)[0];
+    // Sample β ← F^s  
+    let s = safe_loglike!(shape.num_constraints) as usize;
+    let beta = random_oracle.squeeze_field_elements(s);
 
-    // Step 3: Run the sum-check protocol
-    // The claimed sum should be 0 for a satisfied CCS instance
-    let claimed_sum = G::ScalarField::ZERO;
+    // Step 3: Construct the g(x) CCS folding polynomial for sum-check
+    let z = [instance.X.as_slice(), witness.W.as_slice()].concat();
+    let polynomial = construct_css_polynomial(shape, &z, &beta, gamma)?;
+
+    // Step 4: Run the sum-check protocol
+    // The claimed sum should be 0 for a satisfied CCS instance  
     let (sumcheck_proof, prover_state) = MLSumcheck::prove_as_subprotocol(random_oracle, &polynomial);
 
     // Extract the random evaluation point from sum-check
     let r_x = prover_state.randomness;
 
-    // Step 4: Compute the cross-term evaluations (theta_j values)
+    // Step 5: Compute the theta values 
+    // θ_j = Σ_{y∈{0,1}^s'} M_j(r'_x, y) · z(y)
     let vs: Vec<G::ScalarField> = (0..shape.num_matrices)
         .map(|j| {
-            // Compute theta_j = sum_{y in {0,1}^s'} M_j(r_x, y) * z_e(y)
             let M_j_z = shape.Ms[j].multiply_vec(&z);
             vec_to_mle(M_j_z.as_slice()).evaluate::<G>(r_x.as_slice())
         })
         .collect();
 
-    // Step 5: Build the LCCS instance
+    // Step 6: Build the LCCS instance
     // The commitment is the same as the original CCS instance
     let commitment_W = instance.commitment_W.clone();
     
@@ -214,7 +220,7 @@ where
 
     let lccs_instance = LCCSInstance::new(shape, &commitment_W, &X, &r_x, &vs)?;
 
-    // Step 6: Verify the linearized instance is satisfied
+    // Step 7: Verify the linearized instance is satisfied
     shape.is_satisfied_linearized(&lccs_instance, witness, ck)?;
 
     // Convert sumcheck proof to field elements for storage
@@ -230,17 +236,20 @@ where
     })
 }
 
-/// Constructs the CCS polynomial g(X) for the sum-check protocol
+/// Constructs the g(x) polynomial for the sum-check protocol
 ///
-/// The polynomial g(X) is defined as:
-/// g(X) = sum_{i=1}^q c_i * prod_{j in S_i} [sum_{y in {0,1}^s'} M_j(X, y) * z_e(y)]
+/// From the HyperNova paper, for linearization we construct:
+/// g(x) := γ^{μ·t+1} · Q(x)
+/// where Q(x) := eq(β, x) · Σ_{i=1}^q c_i · Π_{j∈S_i} Σ_{y∈{0,1}^s'} M_j(x,y) · z(y)
 ///
 /// This function creates the polynomial representation needed for the sum-check protocol.
-fn construct_ccs_polynomial<G: CurveGroup>(
+fn construct_css_polynomial<G: CurveGroup>(
     shape: &CCSShape<G>,
     z: &[G::ScalarField],
+    beta: &[G::ScalarField],
+    gamma: G::ScalarField,
 ) -> Result<ListOfProductsOfPolynomials<G::ScalarField>, Error> {
-    use ark_poly::DenseMultilinearExtension;
+    use ark_spartan::dense_mlpoly::EqPolynomial;
     use ark_std::rc::Rc;
 
     let num_vars = safe_loglike!(shape.num_constraints) as usize;
@@ -248,31 +257,30 @@ fn construct_ccs_polynomial<G: CurveGroup>(
     // Create a new ListOfProductsOfPolynomials to represent g(x)
     let mut polynomial = ListOfProductsOfPolynomials::new(num_vars);
     
-    // Create multilinear extensions for each matrix-vector product
-    let ml_extensions: Vec<Rc<DenseMultilinearExtension<G::ScalarField>>> = shape.Ms
-        .iter()
-        .map(|M_j| {
-            let M_j_z = M_j.multiply_vec(z);
-            Rc::new(DenseMultilinearExtension::from_evaluations_vec(num_vars, M_j_z))
-        })
-        .collect();
+    // Create the eq(β, x) polynomial
+    let eq_beta = EqPolynomial::new(beta.to_vec());
+    let eq_beta_mle = vec_to_ark_mle(eq_beta.evals().as_slice());
+    
+    // Build g(x) by iterating over each constraint (multiset)
+    // Following the NIMFS pattern
+    (0..shape.num_multisets).for_each(|i| {
+        let mut summand_Q = shape.cSs[i]
+            .1
+            .iter()
+            .map(|j| {
+                Rc::new(vec_to_ark_mle(
+                    shape.Ms[*j].multiply_vec(z).as_slice()
+                ))
+            })
+            .collect::<Vec<Rc<ark_poly::DenseMultilinearExtension<G::ScalarField>>>>();
 
-    // Build the list of products according to the CCS structure
-    for (c_i, S_i) in &shape.cSs {
-        // Create a product of the MLEs corresponding to indices in S_i
-        let mut product_mles = Vec::new();
-        for &j in S_i {
-            if j < ml_extensions.len() {
-                product_mles.push(ml_extensions[j].clone());
-            } else {
-                return Err(Error::InvalidInputLength);
-            }
-        }
+        summand_Q.push(Rc::new(eq_beta_mle.clone()));
         
-        if !product_mles.is_empty() {
-            polynomial.add_product(product_mles, *c_i);
-        }
-    }
+        polynomial.add_product(
+            summand_Q.iter().map(|Qt| Qt.clone()),
+            shape.cSs[i].0 * gamma,
+        );
+    });
 
     Ok(polynomial)
 }
@@ -393,6 +401,7 @@ mod tests {
         
         Ok(())
     }
+
 
     #[test]
     fn test_linearize_multiple_inputs() -> Result<(), Error> {
