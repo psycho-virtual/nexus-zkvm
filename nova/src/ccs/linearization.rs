@@ -11,7 +11,7 @@
 //! 4. Output the LCCS instance
 
 use ark_crypto_primitives::sponge::{Absorb, CryptographicSponge};
-use ark_ec::{AdditiveGroup, CurveGroup};
+use ark_ec::CurveGroup;
 use ark_ff::{Field, PrimeField};
 use ark_r1cs_std::{alloc::AllocVar, fields::fp::FpVar};
 use ark_relations::r1cs::{ConstraintSystem, SynthesisError, SynthesisMode};
