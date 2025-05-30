@@ -75,7 +75,7 @@ impl<F: PrimeField> StepCircuit<F> for Sha256Circuit<F> {
 
         // Record the final number of constraints
         let final_constraints = cs.num_constraints();
-        println!("SHA-256 circuit constraints: {}", final_constraints - initial_constraints);
+        tracing::debug!("SHA-256 circuit constraints: {}", final_constraints - initial_constraints);
 
         // Return the hash as a single field element
         Ok(vec![result_var])

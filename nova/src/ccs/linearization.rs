@@ -16,6 +16,7 @@ use ark_ff::{Field, PrimeField};
 use ark_r1cs_std::{alloc::AllocVar, fields::fp::FpVar};
 use ark_relations::r1cs::{ConstraintSystem, SynthesisError, SynthesisMode};
 use ark_spartan::polycommitments::PolyCommitmentScheme;
+use tracing;
 
 use super::{
     mle::{vec_to_mle, vec_to_ark_mle}, CCSInstance, CCSShape, CCSWitness, Error, LCCSInstance,
@@ -306,8 +307,31 @@ mod tests {
     use ark_r1cs_std::fields::{fp::FpVar, FieldVar};
     use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
     use ark_std::{test_rng, marker::PhantomData};
+    use ark_spartan::polycommitments::PCSKeys;
+    use tracing_subscriber::{
+        filter, fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt,
+    };
 
     type Z = Zeromorph<Bn254>;
+    
+    // Tracing target for linearization tests
+    const TEST_TARGET: &str = "linearization";
+    
+    // Helper function to set up tracing for tests
+    fn setup_test_tracing() -> tracing::subscriber::DefaultGuard {
+        let filter = filter::Targets::new()
+            .with_target(TEST_TARGET, tracing::Level::DEBUG)
+            .with_target("linearization", tracing::Level::DEBUG);
+            
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_span_events(FmtSpan::ENTER | FmtSpan::CLOSE)
+                    .with_test_writer() // This ensures output goes to test stdout
+            )
+            .with(filter)
+            .set_default()
+    }
 
     /// Simple cubic circuit for testing: computes x^3 + x + 5
     #[derive(Debug, Default)]
@@ -337,11 +361,17 @@ mod tests {
 
     #[test]
     fn test_linearize_cubic_circuit() -> Result<(), Error> {
+        let _guard = setup_test_tracing();
+        
         let mut rng = test_rng();
         
-        // Setup polynomial commitment
-        let SRS = Z::setup(20, b"test_linearize", &mut rng).unwrap();
-        let ck = Z::trim(&SRS, 20).ck;
+        // Inline commitment key creation using test_utils pattern
+        let num_vars = 8; // 2^8 = 256, sufficient for cubic circuit
+        let ck = {
+            let SRS = Z::setup(num_vars, b"test", &mut rng).unwrap();
+            let PCSKeys { ck, .. } = Z::trim(&SRS, num_vars);
+            ck
+        };
         
         // Setup random oracle
         let config = poseidon_config::<Fr>();
@@ -364,7 +394,7 @@ mod tests {
             &mut random_oracle,
         )?;
         
-        println!("✓ Linearization completed successfully");
+        tracing::debug!(target: TEST_TARGET, "✓ Linearization completed successfully");
         
         // Test 1: Verify the original CCS instance is satisfied
         result.ccs_shape.is_satisfied(
@@ -372,7 +402,7 @@ mod tests {
             &result.linearization.witness,
             &ck,
         )?;
-        println!("✓ Original CCS instance is satisfied");
+        tracing::debug!(target: TEST_TARGET, "✓ Original CCS instance is satisfied");
         
         // Test 2: Verify the linearized LCCS instance is satisfied
         result.ccs_shape.is_satisfied_linearized(
@@ -380,7 +410,7 @@ mod tests {
             &result.linearization.witness,
             &ck,
         )?;
-        println!("✓ Linearized LCCS instance is satisfied");
+        tracing::debug!(target: TEST_TARGET, "✓ Linearized LCCS instance is satisfied");
         
         // Test 3: Verify the computational relationship is preserved
         // The LCCS instance should encode the same computation as the original
@@ -393,11 +423,11 @@ mod tests {
         
         // Find the output in the public inputs (this depends on how the constraint system is structured)
         // We need to check that the computation was done correctly
-        println!("✓ Computational relationship verified: {} -> {}", current_state, expected_output);
+        tracing::debug!(target: TEST_TARGET, "✓ Computational relationship verified: {} -> {}", current_state, expected_output);
         
         // Test 4: Verify sum-check proof structure
         assert!(!result.linearization.sumcheck_proof.is_empty());
-        println!("✓ Sum-check proof generated");
+        tracing::debug!(target: TEST_TARGET, "✓ Sum-check proof generated");
         
         Ok(())
     }
@@ -405,11 +435,17 @@ mod tests {
 
     #[test]
     fn test_linearize_multiple_inputs() -> Result<(), Error> {
+        let _guard = setup_test_tracing();
+        
         let mut rng = test_rng();
         
-        // Setup polynomial commitment
-        let SRS = Z::setup(20, b"test_multiple", &mut rng).unwrap();
-        let ck = Z::trim(&SRS, 20).ck;
+        // Inline commitment key creation using test_utils pattern - create once and reuse
+        let num_vars = 8; // 2^8 = 256, sufficient for cubic circuit
+        let ck = {
+            let SRS = Z::setup(num_vars, b"test", &mut rng).unwrap();
+            let PCSKeys { ck, .. } = Z::trim(&SRS, num_vars);
+            ck
+        };
         
         // Test with multiple different inputs to ensure consistency
         let test_cases = vec![
@@ -448,7 +484,7 @@ mod tests {
                 &ck,
             )?;
             
-            println!("✓ Test case {} with input {} passed", i, input_val);
+            tracing::debug!(target: TEST_TARGET, "✓ Test case {} with input {} passed", i, input_val);
         }
         
         Ok(())
@@ -456,11 +492,17 @@ mod tests {
 
     #[test]
     fn test_linearization_properties() -> Result<(), Error> {
+        let _guard = setup_test_tracing();
+        
         let mut rng = test_rng();
         
-        // Setup polynomial commitment
-        let SRS = Z::setup(20, b"test_properties", &mut rng).unwrap();
-        let ck = Z::trim(&SRS, 20).ck;
+        // Inline commitment key creation using test_utils pattern
+        let num_vars = 8; // 2^8 = 256, sufficient for cubic circuit
+        let ck = {
+            let SRS = Z::setup(num_vars, b"test", &mut rng).unwrap();
+            let PCSKeys { ck, .. } = Z::trim(&SRS, num_vars);
+            ck
+        };
         
         let config = poseidon_config::<Fr>();
         let mut random_oracle = PoseidonSponge::new(&config);
@@ -481,24 +523,24 @@ mod tests {
         
         // 1. The LCCS instance should have u = 1 (as specified in the algorithm)
         assert_eq!(result.linearization.lccs_instance.X[0], Fr::ONE);
-        println!("✓ LCCS instance has u = 1");
+        tracing::debug!(target: TEST_TARGET, "✓ LCCS instance has u = 1");
         
         // 2. The number of evaluation targets should match the number of matrices
         assert_eq!(
             result.linearization.lccs_instance.vs.len(),
             result.ccs_shape.num_matrices
         );
-        println!("✓ Correct number of evaluation targets");
+        tracing::debug!(target: TEST_TARGET, "✓ Correct number of evaluation targets");
         
         // 3. The evaluation point should have the right dimension
         let expected_rs_len = crate::safe_loglike!(result.ccs_shape.num_constraints) as usize;
         assert_eq!(result.linearization.lccs_instance.rs.len(), expected_rs_len);
-        println!("✓ Evaluation point has correct dimension");
+        tracing::debug!(target: TEST_TARGET, "✓ Evaluation point has correct dimension");
         
         // 4. The commitment should be consistent
         let recomputed_commitment = result.linearization.witness.commit::<Z>(&ck);
         assert_eq!(result.linearization.lccs_instance.commitment_W, recomputed_commitment);
-        println!("✓ Commitment consistency verified");
+        tracing::debug!(target: TEST_TARGET, "✓ Commitment consistency verified");
         
         Ok(())
     }

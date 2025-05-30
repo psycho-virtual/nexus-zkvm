@@ -10,6 +10,10 @@ use ark_crypto_primitives::sponge::constraints::SpongeWithGadget;
 use ark_serialize::{CanonicalSerialize, CanonicalDeserialize};
 use std::marker::PhantomData;
 use std::time::Instant;
+use tracing;
+
+// Tracing target for sequential SHA-256 circuit operations
+const SEQUENTIAL_SHA256_TARGET: &str = "sequential_sha256";
 
 /// A circuit for sequential SHA-256 hash operations
 /// Each step takes the previous hash as input and produces a new hash
@@ -36,7 +40,7 @@ impl<F: PrimeField> StepCircuit<F> for SequentialSha256Circuit<F> {
         _i: &FpVar<F>,
         z: &[FpVar<F>],
     ) -> Result<Vec<FpVar<F>>, SynthesisError> {
-        println!("Starting constraint generation for SHA-256 step");
+        tracing::debug!(target: SEQUENTIAL_SHA256_TARGET, "Starting constraint generation for SHA-256 step");
         let constraint_start = Instant::now();
         
         // Extract the current state (previous hash)
@@ -47,27 +51,31 @@ impl<F: PrimeField> StepCircuit<F> for SequentialSha256Circuit<F> {
         let state_bytes = match current_state.value() {
             Ok(val) => {
                 let bytes = conversions::field_to_bytes(&val);
-                println!(
+                tracing::debug!(
+                    target: SEQUENTIAL_SHA256_TARGET,
                     "Input state value available, converted to bytes of length {}",
                     bytes.len()
                 );
                 bytes
             },
             Err(_) => {
-                println!(
+                tracing::debug!(
+                    target: SEQUENTIAL_SHA256_TARGET,
                     "Input state value not available, using default bytes"
                 );
                 vec![0u8; 32] // Default for constraint generation
             },
         };
 
-        println!(
+        tracing::debug!(
+            target: SEQUENTIAL_SHA256_TARGET,
             "Creating SHA-256 circuit instance for constraint generation"
         );
         // Create a SHA-256 circuit for this step using the previous hash as input
         let sha_circuit = Sha256Circuit::<F>::new(&state_bytes);
 
-        println!(
+        tracing::debug!(
+            target: SEQUENTIAL_SHA256_TARGET,
             "Generating constraints for SHA-256 operation"
         );
         let inner_constraint_start = Instant::now();
@@ -82,7 +90,8 @@ impl<F: PrimeField> StepCircuit<F> for SequentialSha256Circuit<F> {
         let result = sha_circuit.generate_constraints(cs.clone(), &dummy_fp_var, &empty_vec)?;
         
         let inner_constraint_duration = inner_constraint_start.elapsed();
-        println!(
+        tracing::debug!(
+            target: SEQUENTIAL_SHA256_TARGET,
             "SHA-256 constraints generated in {:?}",
             inner_constraint_duration
         );
@@ -92,7 +101,8 @@ impl<F: PrimeField> StepCircuit<F> for SequentialSha256Circuit<F> {
         let num_instance_variables = cs.num_instance_variables();
         let num_witness_variables = cs.num_witness_variables();
         
-        println!(
+        tracing::debug!(
+            target: SEQUENTIAL_SHA256_TARGET,
             "Constraint system stats: {} constraints, {} instance variables, {} witness variables",
             num_constraints,
             num_instance_variables,
@@ -100,7 +110,8 @@ impl<F: PrimeField> StepCircuit<F> for SequentialSha256Circuit<F> {
         );
 
         let constraint_duration = constraint_start.elapsed();
-        println!(
+        tracing::debug!(
+            target: SEQUENTIAL_SHA256_TARGET,
             "SHA-256 step constraint generation completed in {:?}",
             constraint_duration
         );
@@ -132,22 +143,18 @@ where
     RO::Var: ark_crypto_primitives::sponge::constraints::CryptographicSpongeVar<G1::ScalarField, RO, Parameters = RO::Config>,
     RO::Config: CanonicalSerialize + CanonicalDeserialize + Sync,
 {
-    println!("Starting sequential SHA-256 processing for {} steps", steps);
-    println!("\n[Sequential Processing] Initializing with message: \"{}\"", String::from_utf8_lossy(initial_message));
+    tracing::debug!(target: SEQUENTIAL_SHA256_TARGET, "Starting sequential SHA-256 processing for {} steps", steps);
+    tracing::debug!(target: SEQUENTIAL_SHA256_TARGET, "\n[Sequential Processing] Initializing with message: \"{}\"", String::from_utf8_lossy(initial_message));
 
     // Calculate initial hash from the input message
     let initial_hash = calculate_sha256_native(initial_message);
-    print!("Initial hash (hex): ");
-    for (i, byte) in initial_hash.iter().enumerate() {
-        print!("{:02x}", byte);
-        if (i + 1) % 4 == 0 { print!(" "); }
-    }
-    println!();
+    let initial_hash_hex = initial_hash.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join("");
+    tracing::debug!(target: SEQUENTIAL_SHA256_TARGET, "Initial hash (hex): {}", initial_hash_hex);
 
     // Convert initial hash to field element
     let initial_field = conversions::bytes_to_field(&initial_hash);
-    println!("Initial field element: {}", initial_field);
-    println!("Initial hash calculated and converted to field element");
+    tracing::debug!(target: SEQUENTIAL_SHA256_TARGET, "Initial field element: {}", initial_field);
+    tracing::debug!(target: SEQUENTIAL_SHA256_TARGET, "Initial hash calculated and converted to field element");
 
     // Set initial state
     let z_0 = vec![initial_field];
@@ -156,44 +163,40 @@ where
     let circuit = SequentialSha256Circuit::<G1::ScalarField>::new();
     
     // Create initial IVC proof
-    println!("[Sequential Processing] Creating initial IVC proof...");
-    println!("Creating initial IVC proof");
+    tracing::debug!(target: SEQUENTIAL_SHA256_TARGET, "[Sequential Processing] Creating initial IVC proof...");
+    tracing::debug!(target: SEQUENTIAL_SHA256_TARGET, "Creating initial IVC proof");
     let mut recursive_snark = IVCProof::new(&z_0);
 
     // Perform sequential steps
-    println!("[Sequential Processing] Running {} sequential SHA-256 operations...", steps);
+    tracing::debug!(target: SEQUENTIAL_SHA256_TARGET, "[Sequential Processing] Running {} sequential SHA-256 operations...", steps);
     for i in 0..steps {
-        println!("  Step {}: Generating proof...", i + 1);
-        println!("Step {}/{}: Starting proof generation", i + 1, steps);
+        tracing::debug!(target: SEQUENTIAL_SHA256_TARGET, "  Step {}: Generating proof...", i + 1);
+        tracing::debug!(target: SEQUENTIAL_SHA256_TARGET, "Step {}/{}: Starting proof generation", i + 1, steps);
         
         let start = std::time::Instant::now();
         recursive_snark = recursive_snark.prove_step(params, &circuit)?;
         let duration = start.elapsed();
         
-        println!("    Completed in {:.2?}", duration);
-        println!("Step {}/{}: Proof generated in {:?}", i + 1, steps, duration);
+        tracing::debug!(target: SEQUENTIAL_SHA256_TARGET, "    Completed in {:.2?}", duration);
+        tracing::debug!(target: SEQUENTIAL_SHA256_TARGET, "Step {}/{}: Proof generated in {:?}", i + 1, steps, duration);
 
         // Access the current z_i value - it's already a field element, not FpVar
         let z_i_val = recursive_snark.z_i()[0];
         let bytes = conversions::field_to_bytes(&z_i_val);
-        print!("    Hash at step {} (hex): ", i + 1);
-        for (j, byte) in bytes.iter().enumerate() {
-            print!("{:02x}", byte);
-            if (j + 1) % 4 == 0 { print!(" "); }
-        }
-        println!();
+        let hash_hex = bytes.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join("");
+        tracing::debug!(target: SEQUENTIAL_SHA256_TARGET, "    Hash at step {} (hex): {}", i + 1, hash_hex);
     }
 
     // Verify the final proof
-    println!("[Sequential Processing] Verifying the final proof...");
-    println!("Starting verification of final proof");
+    tracing::debug!(target: SEQUENTIAL_SHA256_TARGET, "[Sequential Processing] Verifying the final proof...");
+    tracing::debug!(target: SEQUENTIAL_SHA256_TARGET, "Starting verification of final proof");
     
     let verify_time = std::time::Instant::now();
     recursive_snark.verify(params)?;
     let verify_duration = verify_time.elapsed();
     
-    println!("  ✓ Verification completed in {:.2?}", verify_duration);
-    println!("Final proof verified successfully in {:?}", verify_duration);
+    tracing::debug!(target: SEQUENTIAL_SHA256_TARGET, "  ✓ Verification completed in {:.2?}", verify_duration);
+    tracing::debug!(target: SEQUENTIAL_SHA256_TARGET, "Final proof verified successfully in {:?}", verify_duration);
 
     Ok(recursive_snark)
 }
@@ -201,17 +204,13 @@ where
 
 /// Run and verify a sequential chain using only native SHA-256 for comparison
 pub fn run_native_sequential_sha256(initial_message: &[u8], steps: usize) -> Vec<u8> {
-    println!("\n[Native Sequential] Running {} native SHA-256 operations for comparison", steps);
-    println!("Running native sequential SHA-256 for {} steps (for comparison)", steps);
+    tracing::debug!(target: SEQUENTIAL_SHA256_TARGET, "\n[Native Sequential] Running {} native SHA-256 operations for comparison", steps);
+    tracing::debug!(target: SEQUENTIAL_SHA256_TARGET, "Running native sequential SHA-256 for {} steps (for comparison)", steps);
 
     // Calculate initial hash
     let mut current_hash = calculate_sha256_native(initial_message);
-    print!("Initial hash (hex): ");
-    for (i, byte) in current_hash.iter().enumerate() {
-        print!("{:02x}", byte);
-        if (i + 1) % 4 == 0 { print!(" "); }
-    }
-    println!();
+    let current_hash_hex = current_hash.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join("");
+    tracing::debug!(target: SEQUENTIAL_SHA256_TARGET, "Initial hash (hex): {}", current_hash_hex);
 
     // Perform sequential steps
     for i in 0..steps {
@@ -219,14 +218,9 @@ pub fn run_native_sequential_sha256(initial_message: &[u8], steps: usize) -> Vec
         current_hash = calculate_sha256_native(&current_hash);
         let hash_duration = hash_start.elapsed();
         
-        println!("Native step {}/{}: Hash calculated in {:?}", i + 1, steps, hash_duration);
-
-        print!("Hash at step {} (hex): ", i + 1);
-        for (j, byte) in current_hash.iter().enumerate() {
-            print!("{:02x}", byte);
-            if (j + 1) % 4 == 0 { print!(" "); }
-        }
-        println!();
+        let hash_hex = current_hash.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join("");
+        tracing::debug!(target: SEQUENTIAL_SHA256_TARGET, "Native step {}/{}: Hash calculated in {:?}", i + 1, steps, hash_duration);
+        tracing::debug!(target: SEQUENTIAL_SHA256_TARGET, "    Hash at step {} (hex): {}", i + 1, hash_hex);
     }
 
     current_hash
@@ -255,7 +249,7 @@ mod tests {
 
     #[test]
     fn test_sequential_sha256_circuit_creation() {
-        println!("Testing sequential SHA-256 circuit creation");
+        tracing::debug!(target: SEQUENTIAL_SHA256_TARGET, "Testing sequential SHA-256 circuit creation");
         
         // Test that we can create the circuit
         let circuit = SequentialSha256Circuit::<Fr>::new();
@@ -263,12 +257,12 @@ mod tests {
         // Verify the ARITY is correct
         assert_eq!(SequentialSha256Circuit::<Fr>::ARITY, 1);
         
-        println!("✓ Sequential SHA-256 circuit creation test passed");
+        tracing::debug!(target: SEQUENTIAL_SHA256_TARGET, "✓ Sequential SHA-256 circuit creation test passed");
     }
     
     #[test]
     fn test_native_sequential_sha256() {
-        println!("Testing native sequential SHA-256");
+        tracing::debug!(target: SEQUENTIAL_SHA256_TARGET, "Testing native sequential SHA-256");
         
         // Initial data to hash
         let initial_data = b"hello world".to_vec();
@@ -280,7 +274,7 @@ mod tests {
         // Verify we got a 32-byte hash
         assert_eq!(final_hash.len(), 32);
         
-        println!("✓ Native sequential SHA-256 test passed");
+        tracing::debug!(target: SEQUENTIAL_SHA256_TARGET, "✓ Native sequential SHA-256 test passed");
     }
     
     /*
@@ -288,7 +282,7 @@ mod tests {
     // to be properly set up with the correct types from this codebase
     #[test]
     fn test_sequential_sha256() -> Result<(), Box<dyn std::error::Error>> {
-        println!("Starting sequential_sha256_test");
+        tracing::debug!(target: SEQUENTIAL_SHA256_TARGET, "Starting sequential_sha256_test");
         
         // Initial data to hash
         let initial_data = b"hello world".to_vec();
@@ -297,7 +291,7 @@ mod tests {
         let circuit = SequentialSha256Circuit::<Fr>::new();
         let ro_config = poseidon_config();
         
-        println!("Setting up test public parameters");
+        tracing::debug!(target: SEQUENTIAL_SHA256_TARGET, "Setting up test public parameters");
         
         let params = PublicParams::<G1, G2, C1, C2, RO, SequentialSha256Circuit<Fr>>::test_setup(
             ro_config,
@@ -323,10 +317,10 @@ mod tests {
 
         // Compare results
         let hash_match = expected_hash == final_hash;
-        println!("\n[Test Result] ZK proof hash matches native implementation: {}",
+        tracing::debug!(target: SEQUENTIAL_SHA256_TARGET, "\n[Test Result] ZK proof hash matches native implementation: {}",
                  if hash_match { "Yes ✓" } else { "No ✗" });
 
-        println!("Test result: ZK proof hash matches native implementation: {}",
+        tracing::debug!(target: SEQUENTIAL_SHA256_TARGET, "Test result: ZK proof hash matches native implementation: {}",
                  if hash_match { "Yes" } else { "No"  });
 
         assert!(hash_match, "Hash mismatch between ZK proof and native implementation");

@@ -256,6 +256,7 @@ where
 pub(crate) mod tests {
 
     use super::*;
+    use tracing;
 
     use crate::poseidon_config;
     use crate::{
@@ -292,28 +293,28 @@ pub(crate) mod tests {
         C: PolyCommitmentScheme<Projective<G>>,
         C::PolyCommitmentKey: Clone,
     {
-        println!("\n==== NIMFS FOLDING PROVER TEST ====");
-        println!("\nThis test demonstrates a complete NIMFS folding operation with timings\n");
+        tracing::info!("==== NIMFS FOLDING PROVER TEST ====");
+        tracing::info!("This test demonstrates a complete NIMFS folding operation with timings");
         
         // Start timing the setup
-        println!("1. Configuration:");
+        tracing::debug!("1. Configuration:");
         let start_setup = ark_std::time::Instant::now();
         
         let config = poseidon_config::<G::ScalarField>();
         let mut rng = test_rng();
 
-        println!("   - Using BLS12-381 elliptic curve");
-        println!("   - Using Poseidon sponge for random oracle");
+        tracing::debug!("   - Using BLS12-381 elliptic curve");
+        tracing::debug!("   - Using Poseidon sponge for random oracle");
         
         // Setup test CCS
-        println!("\n2. Setting up test environment...");
+        tracing::debug!("2. Setting up test environment...");
         let (shape, U2, W2, ck) = setup_test_ccs::<G, C>(3, None, Some(&mut rng));
         
-        println!("   - Constraint system shape:");
-        println!("     - {} constraints", shape.num_constraints);
-        println!("     - {} witness variables", shape.num_vars);
-        println!("     - {} IO variables", shape.num_io);
-        println!("     - {} matrices", shape.num_matrices);
+        tracing::debug!("   - Constraint system shape:");
+        tracing::debug!("     - {} constraints", shape.num_constraints);
+        tracing::debug!("     - {} witness variables", shape.num_vars);
+        tracing::debug!("     - {} IO variables", shape.num_io);
+        tracing::debug!("     - {} matrices", shape.num_matrices);
 
         // Create first instance (linearized CCS)
         let X = to_field_elements::<Projective<G>>((vec![0; shape.num_io]).as_slice());
@@ -331,9 +332,9 @@ pub(crate) mod tests {
             })
             .collect();
         
-        println!("   - Created LCCS instance (instance 1)");
-        println!("   - Created standard CCS instance (instance 2)");
-        println!("   - Setup completed in: {:?}", start_setup.elapsed());
+        tracing::debug!("   - Created LCCS instance (instance 1)");
+        tracing::debug!("   - Created standard CCS instance (instance 2)");
+        tracing::debug!("   - Setup completed in: {:?}", start_setup.elapsed());
 
         let U1 = LCCSInstance::<Projective<G>, C>::new(
             &shape,
@@ -346,7 +347,7 @@ pub(crate) mod tests {
         let vk = G::ScalarField::ZERO;
         
         // First folding operation
-        println!("\n3. Executing first NIMFS folding operation...");
+        tracing::debug!("3. Executing first NIMFS folding operation...");
         let start_prove1 = ark_std::time::Instant::now();
         
         let mut random_oracle = PoseidonSponge::new(&config);
@@ -360,9 +361,9 @@ pub(crate) mod tests {
             )?;
         
         let prove_time1 = start_prove1.elapsed();
-        println!("   - Folding prover completed in: {:?}", prove_time1);
+        tracing::debug!("   - Folding prover completed in: {:?}", prove_time1);
         
-        println!("\n4. Verifying first folding...");
+        tracing::debug!("4. Verifying first folding...");
         let start_verify1 = ark_std::time::Instant::now();
         
         let mut random_oracle = PoseidonSponge::new(&config);
@@ -370,27 +371,27 @@ pub(crate) mod tests {
             proof.verify_as_subprotocol(&mut random_oracle, &vk, &shape, &U1, &U2)?;
         
         let verify_time1 = start_verify1.elapsed();
-        println!("   - Verification completed in: {:?}", verify_time1);
+        tracing::debug!("   - Verification completed in: {:?}", verify_time1);
         
         assert_eq!(folded_U, v_folded_U);
         shape.is_satisfied_linearized(&folded_U, &folded_W, &ck)?;
         
-        println!("\n5. First fold results:");
-        println!("   - Proof details:");
-        println!("     - Sumcheck proof with {} messages", proof.sumcheck_proof.len());
-        println!("     - {} sigma values and {} theta values", proof.sigmas.len(), proof.thetas.len());
+        tracing::debug!("5. First fold results:");
+        tracing::debug!("   - Proof details:");
+        tracing::debug!("     - Sumcheck proof with {} messages", proof.sumcheck_proof.len());
+        tracing::debug!("     - {} sigma values and {} theta values", proof.sigmas.len(), proof.thetas.len());
         
         // Second folding operation with folded instance
-        println!("\n6. Setting up second folding operation...");
-        println!("   - Using the folded instance as the new first instance");
-        println!("   - Creating a new second instance with different witness");
+        tracing::debug!("6. Setting up second folding operation...");
+        tracing::debug!("   - Using the folded instance as the new first instance");
+        tracing::debug!("   - Creating a new second instance with different witness");
 
         let U1 = folded_U;
         let W1 = folded_W;
 
         let (_, U2, W2, _) = setup_test_ccs(5, Some(&ck), Some(&mut rng));
         
-        println!("\n7. Executing second NIMFS folding operation...");
+        tracing::debug!("7. Executing second NIMFS folding operation...");
         let start_prove2 = ark_std::time::Instant::now();
 
         let mut random_oracle = PoseidonSponge::new(&config);
@@ -403,9 +404,9 @@ pub(crate) mod tests {
         )?;
         
         let prove_time2 = start_prove2.elapsed();
-        println!("   - Second folding completed in: {:?}", prove_time2);
+        tracing::debug!("   - Second folding completed in: {:?}", prove_time2);
         
-        println!("\n8. Verifying second folding...");
+        tracing::debug!("8. Verifying second folding...");
         let start_verify2 = ark_std::time::Instant::now();
 
         let mut random_oracle = PoseidonSponge::new(&config);
@@ -413,18 +414,18 @@ pub(crate) mod tests {
             proof.verify_as_subprotocol(&mut random_oracle, &vk, &shape, &U1, &U2)?;
         
         let verify_time2 = start_verify2.elapsed();
-        println!("   - Second verification completed in: {:?}", verify_time2);
+        tracing::debug!("   - Second verification completed in: {:?}", verify_time2);
         
         assert_eq!(folded_U, v_folded_U);
         shape.is_satisfied_linearized(&folded_U, &folded_W, &ck)?;
         
-        println!("\n9. Summary of NIMFS folding operations:");
-        println!("   - Successfully folded three instances into one");
-        println!("   - First folding time: {:?}", prove_time1);
-        println!("   - Second folding time: {:?}", prove_time2);
-        println!("   - Total folding time: {:?}", prove_time1 + prove_time2);
+        tracing::info!("9. Summary of NIMFS folding operations:");
+        tracing::info!("   - Successfully folded three instances into one");
+        tracing::info!("   - First folding time: {:?}", prove_time1);
+        tracing::info!("   - Second folding time: {:?}", prove_time2);
+        tracing::info!("   - Total folding time: {:?}", prove_time1 + prove_time2);
         
-        println!("\n==== TEST COMPLETED SUCCESSFULLY ====");
+        tracing::info!("==== TEST COMPLETED SUCCESSFULLY ====");
         
         Ok(())
     }
@@ -441,31 +442,31 @@ pub(crate) mod tests {
         // We'll use a simpler test here to match the latticefold test format
         // but with the existing setup_test_ccs function which works with this codebase
         
-        println!("\n==== FOLDING PROVER TEST ====");
-        println!("\nThis test demonstrates a complete folding operation with timings\n");
+        tracing::info!("==== FOLDING PROVER TEST ====");
+        tracing::info!("This test demonstrates a complete folding operation with timings");
         
         // Start timing the setup
-        println!("1. Configuration:");
+        tracing::debug!("1. Configuration:");
         let start_setup = ark_std::time::Instant::now();
         
         let config = poseidon_config::<G::ScalarField>();
         let mut rng = test_rng();
         
-        println!("   - Using BLS12-381 elliptic curve");
-        println!("   - Using Poseidon sponge for random oracle");
+        tracing::debug!("   - Using BLS12-381 elliptic curve");
+        tracing::debug!("   - Using Poseidon sponge for random oracle");
         
         // Setup test CCS with larger dimensions
         let (shape, _, _, ck) = setup_test_ccs::<G, C>(24, None, Some(&mut rng));
         
-        println!("   - Matrix dimensions: C={} rows, W={} columns", 
+        tracing::debug!("   - Matrix dimensions: C={} rows, W={} columns", 
                  shape.num_constraints, shape.num_vars + shape.num_io);
         
-        println!("   - Setup completed in: {:?}", start_setup.elapsed());
+        tracing::debug!("   - Setup completed in: {:?}", start_setup.elapsed());
         
         // Generate multiple instances to fold (12 as in the latticefold test)
-        println!("\n2. Generated 12 LCCCS instances to fold");
-        println!("   - Each with {} witness elements", shape.num_vars);
-        println!("   - Constraint system with {} constraints", shape.num_constraints);
+        tracing::debug!("2. Generated 12 LCCCS instances to fold");
+        tracing::debug!("   - Each with {} witness elements", shape.num_vars);
+        tracing::debug!("   - Constraint system with {} constraints", shape.num_constraints);
         
         let num_instances = 12;
         let mut all_instances = Vec::with_capacity(num_instances);
@@ -502,7 +503,7 @@ pub(crate) mod tests {
         }
         
         // Folding operation
-        println!("\n3. Executing folding operation...");
+        tracing::debug!("3. Executing folding operation...");
         let start_folding = ark_std::time::Instant::now();
         
         let vk = G::ScalarField::zero();
@@ -550,33 +551,33 @@ pub(crate) mod tests {
         }
         
         let folding_time = start_folding.elapsed();
-        println!("   - Folding completed in: {:?}", folding_time);
+        tracing::debug!("   - Folding completed in: {:?}", folding_time);
         
-        println!("\n4. Folding performed these operations:");
-        println!("   a. Generated gamma, beta challenges for each fold");
-        println!("   b. Constructed sumcheck polynomial for each instance pair");
-        println!("   c. Ran sumcheck protocol to prove polynomial identities");
-        println!("   d. Computed sigma and theta values for each fold");
-        println!("   e. Used rho challenge to combine instances");
+        tracing::debug!("4. Folding performed these operations:");
+        tracing::debug!("   a. Generated gamma, beta challenges for each fold");
+        tracing::debug!("   b. Constructed sumcheck polynomial for each instance pair");
+        tracing::debug!("   c. Ran sumcheck protocol to prove polynomial identities");
+        tracing::debug!("   d. Computed sigma and theta values for each fold");
+        tracing::debug!("   e. Used rho challenge to combine instances");
         
         // Count the proof elements
         let total_sigma_elements: usize = all_sigmas.iter().map(|v| v.len()).sum();
         let total_theta_elements: usize = all_thetas.iter().map(|v| v.len()).sum();
         
-        println!("\n5. Results:");
-        println!("   - Original statements: {} LCCCS instances", num_instances);
-        println!("   - Proof has:");
-        println!("     - Sumcheck proofs with randomness");
-        println!("     - {} sigma vectors", all_sigmas.len());
-        println!("     - {} theta vectors", all_thetas.len());
-        println!("     - Total sigma elements: {} values", total_sigma_elements);
-        println!("     - Total theta elements: {} values", total_theta_elements);
+        tracing::info!("5. Results:");
+        tracing::info!("   - Original statements: {} LCCCS instances", num_instances);
+        tracing::info!("   - Proof has:");
+        tracing::info!("     - Sumcheck proofs with randomness");
+        tracing::info!("     - {} sigma vectors", all_sigmas.len());
+        tracing::info!("     - {} theta vectors", all_thetas.len());
+        tracing::info!("     - Total sigma elements: {} values", total_sigma_elements);
+        tracing::info!("     - Total theta elements: {} values", total_theta_elements);
         
         // Verify the final folded instance
         let satisfied = shape.is_satisfied_linearized(&folded_U, &folded_W, &ck).is_ok();
         assert!(satisfied, "Final folded instance does not satisfy the constraint system");
         
-        println!("\n==== TEST COMPLETED SUCCESSFULLY ====");
+        tracing::info!("==== TEST COMPLETED SUCCESSFULLY ====");
         
         Ok(())
     }
