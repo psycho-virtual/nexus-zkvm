@@ -4,8 +4,8 @@ This document describes the leaf-prover routine for HyperNova, which is invoked 
 1. **Linearised** into a single LCCS object
 2. **Wrapped** inside the augmented step-circuit that HyperNova will feed to the next Nova recursion layer
 
-There is no running accumulator at this level; we always fold against the default zero instance $U_⊥$. Two distinct witnesses appear:
-- $w_{base}$ – satisfies the original CCS constraints
+There is no running accumulator at this level. Two distinct witnesses appear:
+- $w_{base}$ – satisfies the original CCS constraints that represents the circuit of the underlying base logic
 - $w_{aug}$ – satisfies the augmented R1CS circuit (contains $w_{base}$ plus all auxiliary data)
 
 For randomness we use a domain-separated random oracle $R: \{0,1\}^* \to \mathbb{F}$.
@@ -34,14 +34,13 @@ Note: $pk_{NIFS}$ already embeds the verifier key $vk_{NIFS}$ that the step-circ
 C := Commit(w_base; r_C)
 r_C ← R("commit" ∥ w_base)
 β ← R("beta" ∥ r_C)  // Derive folding randomness from commitment using domain-separated RO
-β ← R("beta" ∥ r_C)  // Derive folding randomness from commitment using domain-separated RO
 γ ← R("gamma" ∥ r_C) // Derive gamma parameter for linear combination using same commitment
 ```
 
 ### 1.2 Run the Sum-Check Protocol
 **Polynomial to prove zero sum:**
 ```
-g(X) = γ * eq(β, x) ∑_{i=1}^q c_i ∏_{j ∈ S_i} [∑_y M_{f_j}(X, y) · z_e(y)]
+g(X) = γ * eq(β, X) ∑_{i=1}^q c_i ∏_{j ∈ S_i} [∑_y M_{f_j}(X, y) · z_e(y)]
 ```
 
 Run the standard public-coin Sum-Check with claimed sum:
@@ -79,18 +78,13 @@ The augmented circuit takes as public inputs:
 )
 ```
 
-### 2.2 Augmented Circuit Witness
-The private witness contains:
-```
-w_aug = (w_base,              // original CCS witness
-         r_C,                 // randomness for commitment
-         π_SC,                // Sum-Check transcript
-         {σⱼ,ₖ}, {θⱼ,ₖ},       // auxiliary folding values
-         ρ,                   // folding challenge
-         intermediate_values) // other auxiliary data
-```
+### 2.2 Circuit Mathematical Relatins
 
-### 2.3 Circuit Constraint Groups
+#### (a) Application Circuit Constraints
+The circuit includes the original computation:
+```
+Original_Circuit(w_base, x) = 1
+```
 
 **Random Oracle Value Computation:**
 The augmented circuit must first compute the random oracle values β and γ that were used in the original protocol:
@@ -105,7 +99,7 @@ These values are critical for verifying:
 - The NIFS verification equation which uses powers of γ
 - The equality check e₂ = eq(β, r'ₓ)
 
-#### (a) Sum-Check Verification Constraints
+#### (b) Sum-Check Verification Constraints
 The circuit verifies the Sum-Check proof by enforcing:
 
 **Round polynomial consistency:** For each round k = 1, ..., s:
@@ -123,7 +117,7 @@ g(r_x) = ∑_{i=1}^q c_i ∏_{j ∈ S_i} v_j = 0
 r_x = (r₁, r₂, ..., r_s) derived from π_SC
 ```
 
-#### (b) Auxiliary Values Verification Constraints
+#### (c) Auxiliary Values Verification Constraints
 The circuit verifies that the auxiliary values were computed correctly:
 
 **Equality check computations:**
@@ -136,13 +130,16 @@ e₂ = eq(β, r'ₓ)
 c = ∑_{k∈[ν]} γ · e₂ · ∑_{i=1}^q cᵢ ∏_{j∈Sᵢ} θⱼ,ₖ
 ```
 
-#### (c) Base Circuit Constraints
-The circuit includes the original computation:
+### 2.4 Synthesize Augmented Witness w_aug
+
+The augmented circuit witness `w_aug` is the solution that satisfies the augmented circuit. It contains the following values:
 ```
-Original_Circuit(w_base, x) = 1
+(w_base, r_C, π_SC, {σⱼ,ₖ}, {θⱼ,ₖ}, ρ, r_aug, intermediate_values)
 ```
 
-### 2.4 Synthesize Augmented Instance and Witness
+as well as other intermediate values needed to satisfy all the verification constraints in the augmented circuit.
+
+### 2.5 Construct u_aug
 
 **Commit to augmented witness:**
 ```
@@ -152,21 +149,25 @@ C_aug := Commit(w_aug; r_aug)
 
 **Augmented circuit instance:**
 ```
-u_aug := (C_aug, x, C, r'ₓ, v₁, ..., vₜ, L_fold)
+u_aug = (C_aug,          // commitment to augmented witness
+         x,              // public input from base circuit
+         r_x,            // sum-check randomness derived from π_SC
+         v_1, ..., v_t,  // CCS structure values
+         ρ,              // randomness scalar from prover
+         r_aug)          // commitment randomness for augmented witness
 ```
 
-**Final witness:**
-```
-w_aug := (w_base, r_C, π_SC, {σⱼ,ₖ}, {θⱼ,ₖ}, ρ, r_aug, intermediate_values)
-```
+
 
 ## Step 3: Return Values
 
 ```
-return (u_aug, w_aug)            // augmented circuit instance & witness for HyperNova
+return (⊥, ⊥,                    // empty LCCS pair (no actual folding at leaf level)
+        u_aug, w_aug)            // augmented circuit instance & witness for HyperNova
 ```
 
 The output consists of:
+- **Empty LCCS pair** `(⊥, ⊥)` - No folding occurs at the leaf level, so we return empty/default values
 - **Augmented circuit instance and witness** `(u_aug, w_aug)` - Ready to be fed into the parents of HyperNova
 
 The augmented circuit encapsulates:
@@ -184,8 +185,10 @@ The augmented circuit encapsulates:
 ```
 FoldInnerLCCS(
     pk_NIFS, s,                 // folding-scheme prover key & CCS structure
-    (U_L, W_L),                 // left LCCS instance & witness
-    (U_R, W_R)                  // right LCCS instance & witness
+    (U_1, W_1),                 // first child LCCS instance & witness
+    (U_2, W_2),                 // second child LCCS instance & witness
+    (u_1, w_1),                 // first child synthesized witness from previous round
+    (u_2, w_2)                  // second child synthesized witness from previous round
 ) -> (
     U_F, W_F,                   // folded LCCS instance & witness
     u_aug, w_aug                // augmented circuit (instance, witness)
@@ -196,22 +199,45 @@ Note: `pk_NIFS` embeds the verifier key `vk_NIFS`; all randomness comes from dom
 
 ### Step 1: Public Objects of the Two Children
 
-Each child is:
+**LCCS instances and witnesses from child nodes:**
+Each child LCCS pair is:
 ```
-U_∙ = (C_∙, 1, x_∙, r_{x,∙}, v_{∙,1}, …, v_{∙,t})
-W_∙ = w_∙
+U_i = (C_i, 1, x_i, r_{x,i}, v_{i,1}, …, v_{i,t})    // LCCS instance
+W_i                                                  // LCCS witness
 ```
-where `∙ ∈ {L, R}`.
+where `i ∈ {1, 2}` and:
+- `C_i`: Commitment to the witness vector
+- `x_i`: Public input vector 
+- `r_{x,i}`: Evaluation point from Sum-Check protocol
+- `v_{i,j}`: Linear combination values for each selector j
+- `w_i`: Private witness vector satisfying the LCCS relation
+
+**Synthesized witnesses from previous folding rounds:**
+Each synthesized witness pair is:
+```
+u_i = (C_i, x_i, r_i, v_{i,1}, …, v_{i,t})          // synthesized instance
+w_i = witness from previous round                   // synthesized witness
+```
+where `i ∈ {1, 2}` and:
+- `C_i`: Commitment to the synthesized witness
+- `x_i`: Public input from the augmented circuit  
+- `r_i`: Randomness/evaluation point from previous folding
+- `v_{i,j}`: Folded linear values from previous round
+- `w_i`: Private witness containing all auxiliary data from previous folding operations
 
 ### Step 2: Sum-Check that Both Inputs Were Valid
 
 #### 2.1 Polynomial to Collapse the Two Siblings
 
-Define, with fresh verifier coefficients `γ₁, …, γₜ ← R`:
+Define, with fresh verifier coefficients `γ ← R` and `r_x <- R`:
 
 ```
-g(X) = ∑_{j∈[t]} γⱼ · [eq(r_{x,L}, X) · ∑_{y∈{0,1}^{s'}} M_{fⱼ}(X, y) · z_{e,L}(y) + ρ · eq(r_{x,R}, X) · ∑_{y∈{0,1}^{s'}} M_{fⱼ}(X, y) · z_{e,R}(y)]
+g(X) = eq(r_{x,1}, X) · ∑_{y∈{0,1}^{s'}} M_{fⱼ}(X, y) · z_{e,1}(y) 
+     + γ · eq(r_{x,2}, X) · ∑_{y∈{0,1}^{s'}} M_{fⱼ}(X, y) · z_{e,2}(y)
 ```
+
+*Notice that z_{e,1}(y) and z_{e,2}(y) are the folded witness values of the application circuit witnesses*
+*We do not include in the sumcheck with witnesses involving the sythesized witness*
 
 The two LCCS equations hold iff:
 ```
@@ -224,8 +250,8 @@ Verifier challenges through the random oracle produce `r'ₓ ∈ F^s` and the cl
 
 **Prover sends:**
 ```
-σ'_{L,j} = ∑_y M_{fⱼ}(r'ₓ, y) · z_{e,L}(y)
-σ'_{R,j} = ∑_y M_{fⱼ}(r'ₓ, y) · z_{e,R}(y)
+σ'_{1,j} = ∑_y M_{fⱼ}(r'ₓ, y) · z_{e,1}(y)
+σ'_{2,j} = ∑_y M_{fⱼ}(r'ₓ, y) · z_{e,2}(y)
 ```
 
 **Verifier recomputes** `g(r'ₓ)` with the formula above and accepts the transcript `π_SC` if it matches `c`.
@@ -237,16 +263,16 @@ Verifier challenges through the random oracle produce `r'ₓ ∈ F^s` and the cl
 
 **Sample folding challenge:**
 ```
-ρ ← R("fold-ρ" ∥ π_SC ∥ r'ₓ) ∈ F
+ρ ← R("fold-ρ" ∥ C1 | C2 | C1 | C2 ∥ r'ₓ) ∈ F
 ```
 
-**Compute folded fields:**
+**Fold LCCS commitments and witnesses:**
 ```
-C_F := C_L + ρ · C_R
-x_F := x_L + ρ · x_R  
-r_{x,F} := r_{x,L} + ρ · r_{x,R}
-v_{j,F} := v_{j,L} + ρ · v_{j,R}  (for j = 1…t)
-W_F := w_L + ρ · w_R
+C_F := C_L + ρ · C_R + p^2 · C_l  + p^4 · C_r
+x_F := x_1 + ρ · x_2 + ρ^2 · x_{synth,1} + ρ^4 · x_{synth,2}
+r_{x,F} := r_{x,1} + ρ · r_{x,2} + ρ^2 · r_1 + ρ^4 · r_2
+v_{j,F} := v_{j,1} + ρ · v_{j,2} + ρ^2 · v_{synth,1,j} + ρ^4 · v_{synth,2,j}  (for j = 1…t)
+W_F := w_1 + ρ · w_2 + ρ^2 · w_{synth,1} + ρ^4 · w_{synth,2}
 ```
 
 **Fold-output instance:**
@@ -254,62 +280,65 @@ W_F := w_L + ρ · w_R
 U_F := (C_F, 1, x_F, r_{x,F}, v_{1,F}, …, v_{t,F})
 ```
 
-*Note: Exactly one MSM (to update the commitment) is needed.*
+*Note: Multiple MSMs are needed to update both the LCCS and synthesized commitments.*
 
 ### Step 4: Augmented R1CS Circuit
 
-The step-circuit `FoldVerifier(vk_NIFS, U_L, U_R, ρ, π_SC)` is embedded into Nova's next layer. It contains three verification blocks:
+The step-circuit `FoldVerifier(vk_NIFS, U_L, U_R, u_l, u_r, ρ, π_SC)` is embedded into Nova's next layer. It contains four verification blocks:
 
-#### 4.1 Field Folding Verification
-**Role:** Recompute C_F, x_F, r_{x,F}, v_{j,F} and assert they equal the public outputs
-**Enforced Relation:** Linear equations over F
 
-#### 4.2 Sum-Check Verifier
+#### 4.1 Sum-Check Verifier
 **Role:** Checks each round polynomial & finally g(r'ₓ) = c = 0
-**Enforced Relation:** Degree-d for every round
 
-#### 4.3 Folding Challenge Computation
-**Role:** Recompute the folding challenge inside the circuit
-**Enforced Relation:** 
-```
-ρ ← R("fold-ρ" ∥ π_SC ∥ r'ₓ)
-```
-This ensures that the folding challenge ρ used in the commitment folding is correctly derived from the sumcheck transcript and evaluation point.
 
-#### 4.4 Commitment Consistency  
-**Role:** Verifies C_F = C_L + ρC_R inside the EC group (one MSM). Uses a cycle of elliptic curves to prove that the elliptic curve addition is computed correctly
-**Enforced Relation:** Uses homomorphic property
+#### 4.2 Folding Challenge Computation
+**Role:** Recompute C_F, x_F, r_{x,F}, v_{j,F} and assert they equal the public outputs in U_{F}:
+- **C_F** = C_L + ρ·C_R + ρ²·C_l + ρ⁴·C_r (folded commitment)
+- **x_F** = x_1 + ρ·x_2 + ρ²·x_{synth,1} + ρ⁴·x_{synth,2} (folded public input)
+- **r_{x,F}** = r_{x,1} + ρ·r_{x,2} + ρ²·r_1 + ρ⁴·r_2 (folded evaluation point)
+- **v_{j,F}** = v_{j,1} + ρ·v_{j,2} + ρ²·v_{synth,1,j} + ρ⁴·v_{synth,2,j} ∀j∈[1..t] (folded linear values)
+
+*Note: These homomorphic combinations require multiple multi-scalar multiplications (MSMs) to update both the LCCS commitments and synthesized witness commitments.*
+
+```
+ρ ← R("fold-ρ" ∥ π_SC ∥ r'ₓ ∥ C_1 ∥ C_2 ∥ x_1 ∥ x_2)
+```
+This ensures that the folding challenge ρ incorporates both the sumcheck transcript and the synthesized witness commitments.
 
 The circuit outputs `accept = 1`.
 
-**Public inputs of the circuit:**
+**The augmented circuit synthesizes its witness containing:**
+
+The circuit does not construct these values but rather includes them as:
+- Existing witnesses from child LCCS instances
+- Randomness derived from the protocol transcript
+- Cryptographic proofs that will be verified by constraints
+
 ```
-(C_L, x_L, r_{x,L}, v_L[1..t],
- C_R, x_R, r_{x,R}, v_R[1..t], 
- C_F, x_F, r_{x,F}, v_F[1..t])
+(C_F,                            // LCCS witness vectors from folding
+U_F, w_2, w*,                             // synthesized witness components
+ρ, π_SC, r'ₓ,                             // folding challenge, sum-check transcript, eval point
+σ'_{1,1..t}, σ'_{2,1..t},                 // LCCS inner-product proofs
+σ'_{synth,1,1..t}, σ'_{synth,2,1..t})     // synthesized witness evaluation proofs
 ```
 
-**Synthesize the augmented circuit witness:**
-```
-w_aug := (w_L, w_R, W_F,              // LCCS witnesses (vectors)
-          ρ, π_SC, r'ₓ,               // folding & sum-check randomness/trace
-          σ'_{L,1..t}, σ'_{R,1..t})   // inner-product evaluations
-```
 
 ### Step 5: Commit
 
 **Derive commitment from the synthesized witness:**
 ```
-r_aug ← R("aug-commit")
+r_aug ← R("aug-commit" ∥ w_aug)
 C_aug := Commit(w_aug; r_aug)
 ```
 
 **Compute augmented instance from the circuit's public inputs and commitment:**
-```
-u_aug := (C_aug, C_L, x_L, r_{x,L}, v_L[1..t],
-                 C_R, x_R, r_{x,R}, v_R[1..t], 
-                 C_F, x_F, r_{x,F}, v_F[1..t])
-```
+u_aug := (C_aug,          // commitment to augmented witness
+          x,              // public input from original circuit
+          C,              // original witness commitment
+          r'ₓ,            // evaluation point from sum-check
+          v₁, ..., vₜ,    // linear combination values for selectors
+          )              // folding parameter from NIFS
+
 
 ### Step 6: Return
 
@@ -319,7 +348,7 @@ return (U_F, W_F,          // folded LCCS pair
 ```
 
 **Performance characteristics:**
-- Exactly one MSM
+- Multiple MSMs for both LCCS and synthesized witness folding
 - O(t·d·log m) field ops for the inner Sum-Check  
 - Logarithmic verifier work inside the parent circuit
 - Preserves HyperNova's linear-in-witness prover cost and succinct verification
