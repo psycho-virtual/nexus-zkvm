@@ -11,12 +11,11 @@
 //! 4. Output the LCCS instance
 
 use ark_crypto_primitives::sponge::{Absorb, CryptographicSponge};
-use ark_ec::CurveGroup;
+use ark_ec::{AdditiveGroup, CurveGroup};
 use ark_ff::{Field, PrimeField};
 use ark_r1cs_std::{alloc::AllocVar, fields::fp::FpVar};
 use ark_relations::r1cs::{ConstraintSystem, SynthesisError, SynthesisMode};
 use ark_spartan::polycommitments::PolyCommitmentScheme;
-use tracing;
 
 use super::{
     mle::{vec_to_mle, vec_to_ark_mle}, CCSInstance, CCSShape, CCSWitness, Error, LCCSInstance,
@@ -34,6 +33,15 @@ pub struct StepFunctionInput<F: PrimeField> {
     pub i: F,
     /// Current state vector
     pub z_i: Vec<F>,
+}
+
+/// Linearization parameters containing precomputed shape and circuit information
+#[derive(Debug, Clone)]
+pub struct LinearizationParams<G: CurveGroup, SC> {
+    /// Precomputed CCS shape from the step circuit
+    pub ccs_shape: CCSShape<G>,
+    /// The step circuit template (for generating constraints)
+    pub step_circuit: SC,
 }
 
 /// Result of the linearization process
@@ -58,14 +66,60 @@ pub struct LCCSLinearization<G: CurveGroup, C: PolyCommitmentScheme<G>> {
     pub sumcheck_proof: Vec<G::ScalarField>,
 }
 
-/// Synthesizes a step circuit and linearizes it into an LCCS instance
+/// Sets up linearization parameters by compiling the step circuit shape once
 ///
-/// This function takes a step circuit and input, synthesizes the constraints to obtain
-/// a CCS instance and witness, then runs the linearization algorithm to produce an
-/// LCCS instance.
+/// This function performs the one-time setup of constraint matrices by running
+/// the step circuit in Setup mode. The resulting parameters can be reused
+/// for multiple linearizations without recomputing the constraint structure.
 ///
 /// # Arguments
-/// * `step_circuit` - The step circuit to synthesize
+/// * `step_circuit` - The step circuit to compile
+///
+/// # Returns
+/// * `LinearizationParams` containing the precomputed shape and circuit
+pub fn setup_linearization<G, SC>(
+    step_circuit: SC,
+) -> Result<LinearizationParams<G, SC>, Error>
+where
+    G: CurveGroup,
+    G::ScalarField: PrimeField,
+    SC: StepCircuit<G::ScalarField>,
+{
+    // ---------- 1. once: compile shape & cache matrices ------------------------
+    let shape_cs = ConstraintSystem::<G::ScalarField>::new_ref();
+    shape_cs.set_mode(SynthesisMode::Setup);
+    
+    // Create blank circuit for shape compilation
+    // We need to allocate dummy variables with the right structure
+    let dummy_i = FpVar::new_witness(shape_cs.clone(), || Ok(G::ScalarField::ZERO))?;
+    let dummy_z: Result<Vec<_>, _> = (0..SC::ARITY)
+        .map(|_| FpVar::new_witness(shape_cs.clone(), || Ok(G::ScalarField::ZERO)))
+        .collect();
+    let dummy_z = dummy_z?;
+    
+    // Generate constraints to extract the shape
+    let _dummy_output = step_circuit.generate_constraints(shape_cs.clone(), &dummy_i, &dummy_z)?;
+    
+    shape_cs.finalize();
+    
+    // Convert R1CS to CCS shape
+    let r1cs_shape = crate::r1cs::R1CSShape::from(shape_cs.clone());
+    let ccs_shape = CCSShape::from(r1cs_shape);
+    
+    Ok(LinearizationParams {
+        ccs_shape,
+        step_circuit,
+    })
+}
+
+/// Synthesizes a step circuit and linearizes it into an LCCS instance
+///
+/// This function takes linearization parameters and input, synthesizes the witness
+/// using precomputed constraint matrices, then runs the linearization algorithm to 
+/// produce an LCCS instance.
+///
+/// # Arguments
+/// * `params` - Precomputed linearization parameters
 /// * `input` - Input to the step circuit
 /// * `ck` - Polynomial commitment key
 /// * `random_oracle` - Random oracle for generating challenges
@@ -73,7 +127,7 @@ pub struct LCCSLinearization<G: CurveGroup, C: PolyCommitmentScheme<G>> {
 /// # Returns
 /// * `LinearizationResult` containing the CCS shape, instance, and linearization
 pub fn synthesize_and_linearize_step<G, C, SC, RO>(
-    step_circuit: &SC,
+    params: &LinearizationParams<G, SC>,
     input: &StepFunctionInput<G::ScalarField>,
     ck: &C::PolyCommitmentKey,
     random_oracle: &mut RO,
@@ -85,39 +139,39 @@ where
     SC: StepCircuit<G::ScalarField>,
     RO: CryptographicSponge,
 {
-    // Step 1: Synthesize the step circuit to obtain CCS shape and instance
-    let (ccs_shape, ccs_instance, witness) = synthesize_step_circuit(step_circuit, input, ck)?;
+    // Step 1: Synthesize witness using precomputed shape
+    let (ccs_instance, witness) = synthesize_step_circuit_with_params(params, input, ck)?;
 
     // Step 2: Run the linearization algorithm
-    let linearization = linearize_ccs(&ccs_shape, &ccs_instance, &witness, ck, random_oracle)?;
+    let linearization = linearize_ccs(&params.ccs_shape, &ccs_instance, &witness, ck, random_oracle)?;
 
     Ok(LinearizationResult {
-        ccs_shape,
+        ccs_shape: params.ccs_shape.clone(),
         ccs_instance,
         linearization,
     })
 }
 
-/// Synthesizes a step circuit into a CCS instance and witness
+/// Synthesizes a step circuit witness using precomputed parameters
 ///
-/// This function creates a constraint system from the step circuit, extracts the
-/// matrices, and constructs the CCS shape, instance, and witness.
-fn synthesize_step_circuit<G, C, SC>(
-    step_circuit: &SC,
+/// This function efficiently generates the witness by reusing precomputed constraint
+/// matrices and only computing the witness assignments.
+pub fn synthesize_step_circuit_with_params<G, C, SC>(
+    params: &LinearizationParams<G, SC>,
     input: &StepFunctionInput<G::ScalarField>,
     ck: &C::PolyCommitmentKey,
-) -> Result<(CCSShape<G>, CCSInstance<G, C>, CCSWitness<G>), Error>
+) -> Result<(CCSInstance<G, C>, CCSWitness<G>), Error>
 where
     G: CurveGroup,
     G::ScalarField: PrimeField,
     C: PolyCommitmentScheme<G>,
     SC: StepCircuit<G::ScalarField>,
 {
-    // Create constraint system for synthesis
+    // ---------- 2. every proof: build the witness only -------------------------
     let cs = ConstraintSystem::new_ref();
-    cs.set_mode(SynthesisMode::Prove { construct_matrices: true });
-
-    // Allocate step index and state variables
+    cs.set_mode(SynthesisMode::Prove { construct_matrices: false }); // no A/B/C reconstruction
+    
+    // Allocate step index and state variables with actual values
     let i_var = FpVar::new_witness(cs.clone(), || Ok(input.i))?;
     let z_vars: Result<Vec<_>, _> = input
         .z_i
@@ -126,8 +180,8 @@ where
         .collect();
     let z_vars = z_vars?;
 
-    // Generate constraints for the step circuit
-    let _z_next = step_circuit.generate_constraints(cs.clone(), &i_var, &z_vars)?;
+    // Generate constraints for the step circuit (witness only)
+    let _z_next = params.step_circuit.generate_constraints(cs.clone(), &i_var, &z_vars)?;
 
     // Finalize the constraint system
     cs.finalize();
@@ -137,16 +191,12 @@ where
     let witness_assignment = cs_borrow.witness_assignment.clone();
     let public_assignment = cs_borrow.instance_assignment.clone();
 
-    // Convert R1CS to CCS
-    let r1cs_shape = crate::r1cs::R1CSShape::from(cs.clone());
-    let ccs_shape = CCSShape::from(r1cs_shape);
-
-    // Create witness and instance
-    let witness = CCSWitness::new(&ccs_shape, &witness_assignment)?;
+    // Create witness and instance using precomputed shape
+    let witness = CCSWitness::new(&params.ccs_shape, &witness_assignment)?;
     let commitment_W = witness.commit::<C>(ck);
-    let ccs_instance = CCSInstance::new(&ccs_shape, &commitment_W, &public_assignment)?;
+    let ccs_instance = CCSInstance::new(&params.ccs_shape, &commitment_W, &public_assignment)?;
 
-    Ok((ccs_shape, ccs_instance, witness))
+    Ok((ccs_instance, witness))
 }
 
 /// Linearizes a CCS instance into an LCCS instance using the sum-check protocol
@@ -373,6 +423,9 @@ mod tests {
             ck
         };
         
+        // Setup linearization parameters once
+        let params = setup_linearization::<G, _>(CubicCircuit::<Fr> { _phantom: PhantomData })?;
+        
         // Setup random oracle
         let config = poseidon_config::<Fr>();
         let mut random_oracle = PoseidonSponge::new(&config);
@@ -386,9 +439,9 @@ mod tests {
             z_i: vec![current_state],
         };
         
-        // Synthesize and linearize
+        // Synthesize and linearize using params
         let result = synthesize_and_linearize_step::<G, Z, _, _>(
-            &CubicCircuit::<Fr> { _phantom: PhantomData },
+            &params,
             &input,
             &ck,
             &mut random_oracle,
@@ -447,6 +500,9 @@ mod tests {
             ck
         };
         
+        // Setup linearization parameters once and reuse
+        let params = setup_linearization::<G, _>(CubicCircuit::<Fr> { _phantom: PhantomData })?;
+        
         // Test with multiple different inputs to ensure consistency
         let test_cases = vec![
             Fr::from(0u64),
@@ -465,7 +521,7 @@ mod tests {
             };
             
             let result = synthesize_and_linearize_step::<G, Z, _, _>(
-                &CubicCircuit::<Fr> { _phantom: PhantomData },
+                &params,
                 &input,
                 &ck,
                 &mut random_oracle,
@@ -504,6 +560,9 @@ mod tests {
             ck
         };
         
+        // Setup linearization parameters once
+        let params = setup_linearization::<G, _>(CubicCircuit::<Fr> { _phantom: PhantomData })?;
+        
         let config = poseidon_config::<Fr>();
         let mut random_oracle = PoseidonSponge::new(&config);
         
@@ -513,7 +572,7 @@ mod tests {
         };
         
         let result = synthesize_and_linearize_step::<G, Z, _, _>(
-            &CubicCircuit::<Fr> { _phantom: PhantomData },
+            &params,
             &input,
             &ck,
             &mut random_oracle,

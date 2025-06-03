@@ -56,22 +56,19 @@ impl<F: PrimeField> StepCircuit<F> for Sha256Circuit<F> {
             &message_vars
         )?;
 
-        // Pack bytes into a field element (starting from least significant)
-        let mut result = F::zero();
+        // Pack bytes into a field element using constraint variables (not witness values)
+        let mut result_var = FpVar::zero();
         let mut power = F::one();
 
         // Use as many bytes as we can fit in the field
         let max_bytes = (F::MODULUS_BIT_SIZE as usize - 1) / 8;
         for byte_var in digest_var.0.iter().take(max_bytes) {
-            // Convert UInt8 to field element and add to result
-            let byte_as_fe = byte_var.value().map(F::from).unwrap_or(F::zero());
-            result += byte_as_fe * power;
+            // Convert UInt8 constraint variable to FpVar and add to result
+            let byte_as_fp = byte_var.to_fp()?;
+            result_var += &byte_as_fp * power;
             // Multiply by 256 for the next byte
             power *= F::from(256u32);
         }
-
-        // Create a witness variable for the result
-        let result_var = FpVar::new_witness(cs.clone(), || Ok(result))?;
 
         // Record the final number of constraints
         let final_constraints = cs.num_constraints();

@@ -797,7 +797,7 @@ mod tests {
                 Ms: vec![],  // Empty for test
                 cSs: vec![], // Empty for test
             }, 
-            &W
+            W.as_slice()
         )?;
         
         // Create commitment
@@ -815,10 +815,10 @@ mod tests {
         let accs = ACCSInstance::<G, Z>::new(
             &commitment_W,
             &v0,
-            &io,
-            &r_x.as_slice(),
-            &r_y.as_slice(),
-            &vs.as_slice(),
+            io.as_slice(),
+            r_x.as_slice(),
+            r_y.as_slice(),
+            vs.as_slice(),
             &v_z,
         )?;
         
@@ -857,8 +857,8 @@ mod tests {
             cSs: vec![], // Empty for test
         };
         
-        let witness1 = CCSWitness::<G>::new(&shape, &W1)?;
-        let witness2 = CCSWitness::<G>::new(&shape, &W2)?;
+        let witness1 = CCSWitness::<G>::new(&shape, W1.as_slice())?;
+        let witness2 = CCSWitness::<G>::new(&shape, W2.as_slice())?;
         
         // Create commitments
         let commitment_W1 = witness1.commit::<Z>(&ck);
@@ -879,20 +879,20 @@ mod tests {
         let accs1 = ACCSInstance::<G, Z>::new(
             &commitment_W1,
             &v0_1,
-            &io,
-            &r_x.as_slice(),
-            &r_y.as_slice(),
-            &vs1.as_slice(),
+            io.as_slice(),
+            r_x.as_slice(),
+            r_y.as_slice(),
+            vs1.as_slice(),
             &v_z1,
         )?;
         
         let accs2 = ACCSInstance::<G, Z>::new(
             &commitment_W2,
             &v0_2,
-            &io,
-            &r_x.as_slice(),
-            &r_y.as_slice(),
-            &vs2.as_slice(),
+            io.as_slice(),
+            r_x.as_slice(),
+            r_y.as_slice(),
+            vs2.as_slice(),
             &v_z2,
         )?;
         
@@ -938,7 +938,7 @@ mod tests {
                 Ms: vec![],  // Empty for test
                 cSs: vec![], // Empty for test
             }, 
-            &W
+            W.as_slice()
         )?;
         
         // Create commitment
@@ -956,10 +956,10 @@ mod tests {
         let result = ACCSInstance::<G, Z>::new(
             &commitment_W,
             &v0,
-            &empty_io,
-            &r_x.as_slice(),
-            &r_y.as_slice(),
-            &vs.as_slice(),
+            empty_io.as_slice(),
+            r_x.as_slice(),
+            r_y.as_slice(),
+            vs.as_slice(),
             &v_z,
         );
         
@@ -971,10 +971,10 @@ mod tests {
         let accs1 = ACCSInstance::<G, Z>::new(
             &commitment_W,
             &v0,
-            &valid_io,
-            &r_x.as_slice(),
-            &r_y.as_slice(),
-            &vs.as_slice(),
+            valid_io.as_slice(),
+            r_x.as_slice(),
+            r_y.as_slice(),
+            vs.as_slice(),
             &v_z,
         )?;
         
@@ -983,10 +983,10 @@ mod tests {
         let accs2 = ACCSInstance::<G, Z>::new(
             &commitment_W,
             &v0,
-            &valid_io,
-            &r_x.as_slice(),
-            &r_y.as_slice(),
-            &different_vs.as_slice(),
+            valid_io.as_slice(),
+            r_x.as_slice(),
+            r_y.as_slice(),
+            different_vs.as_slice(),
             &v_z,
         )?;
         
@@ -1079,11 +1079,11 @@ mod tests {
 
         let X = to_field_elements::<G>(&[0, 0]);
         let W = to_field_elements::<G>(&[0]);
-        let witness = CCSWitness::<G>::new(&ccs_shape, &W)?;
+        let witness = CCSWitness::<G>::new(&ccs_shape, W.as_slice())?;
 
         let commitment_W = witness.commit::<Z>(&ck);
 
-        let instance = CCSInstance::<G, Z>::new(&ccs_shape, &commitment_W, &X)?;
+        let instance = CCSInstance::<G, Z>::new(&ccs_shape, &commitment_W, X.as_slice())?;
 
         ccs_shape.is_satisfied(&instance, &witness, &ck)?;
         Ok(())
@@ -1114,17 +1114,17 @@ mod tests {
 
         let X = to_field_elements::<G>(&[1, 35]);
         let W = to_field_elements::<G>(&[3, 9, 27, 30]);
-        let witness = CCSWitness::<G>::new(&ccs_shape, &W)?;
+        let witness = CCSWitness::<G>::new(&ccs_shape, W.as_slice())?;
 
         let commitment_W = witness.commit::<Z>(&ck);
 
-        let instance = CCSInstance::<G, Z>::new(&ccs_shape, &commitment_W, &X)?;
+        let instance = CCSInstance::<G, Z>::new(&ccs_shape, &commitment_W, X.as_slice())?;
 
         ccs_shape.is_satisfied(&instance, &witness, &ck)?;
 
         // Change commitment.
         let invalid_commitment = commitment_W + commitment_W;
-        let instance = CCSInstance::<G, Z>::new(&ccs_shape, &invalid_commitment, &X)?;
+        let instance = CCSInstance::<G, Z>::new(&ccs_shape, &invalid_commitment, X.as_slice())?;
         assert_eq!(
             ccs_shape.is_satisfied(&instance, &witness, &ck),
             Err(Error::NotSatisfied)
@@ -1132,10 +1132,10 @@ mod tests {
 
         // Provide invalid witness.
         let invalid_W = to_field_elements::<G>(&[4, 9, 27, 30]);
-        let invalid_witness = CCSWitness::<G>::new(&ccs_shape, &invalid_W)?;
+        let invalid_witness = CCSWitness::<G>::new(&ccs_shape, invalid_W.as_slice())?;
         let commitment_invalid_W = invalid_witness.commit::<Z>(&ck);
 
-        let instance = CCSInstance::<G, Z>::new(&ccs_shape, &commitment_invalid_W, &X)?;
+        let instance = CCSInstance::<G, Z>::new(&ccs_shape, &commitment_invalid_W, X.as_slice())?;
         assert_eq!(
             ccs_shape.is_satisfied(&instance, &invalid_witness, &ck),
             Err(Error::NotSatisfied)
@@ -1143,7 +1143,7 @@ mod tests {
 
         // Provide invalid public input.
         let invalid_X = to_field_elements::<G>(&[1, 36]);
-        let instance = CCSInstance::<G, Z>::new(&ccs_shape, &commitment_W, &invalid_X)?;
+        let instance = CCSInstance::<G, Z>::new(&ccs_shape, &commitment_W, invalid_X.as_slice())?;
         assert_eq!(
             ccs_shape.is_satisfied(&instance, &witness, &ck),
             Err(Error::NotSatisfied)
@@ -1178,7 +1178,7 @@ mod tests {
 
         let X = to_field_elements::<G>(&[0, 0]);
         let W = to_field_elements::<G>(&[0]);
-        let witness = CCSWitness::<G>::new(&ccs_shape, &W)?;
+        let witness = CCSWitness::<G>::new(&ccs_shape, W.as_slice())?;
 
         let commitment_W = witness.commit::<Z>(&ck);
 
@@ -1190,7 +1190,7 @@ mod tests {
             .map(|M| vec_to_mle(M.multiply_vec(&z).as_slice()).evaluate::<G>(rs.as_slice()))
             .collect();
 
-        let instance = LCCSInstance::<G, Z>::new(&ccs_shape, &commitment_W, &X, &rs, &vs)?;
+        let instance = LCCSInstance::<G, Z>::new(&ccs_shape, &commitment_W, X.as_slice(), rs.as_slice(), vs.as_slice())?;
 
         ccs_shape.is_satisfied_linearized::<Z>(&instance, &witness, &ck)?;
 
@@ -1222,7 +1222,7 @@ mod tests {
 
         let X = to_field_elements::<G>(&[1, 35]);
         let W = to_field_elements::<G>(&[3, 9, 27, 30]);
-        let witness = CCSWitness::<G>::new(&ccs_shape, &W)?;
+        let witness = CCSWitness::<G>::new(&ccs_shape, W.as_slice())?;
 
         let commitment_W = witness.commit::<Z>(&ck);
 
@@ -1234,13 +1234,13 @@ mod tests {
             .map(|M| vec_to_mle(M.multiply_vec(&z).as_slice()).evaluate::<G>(rs.as_slice()))
             .collect();
 
-        let instance = LCCSInstance::<G, Z>::new(&ccs_shape, &commitment_W, &X, &rs, &vs)?;
+        let instance = LCCSInstance::<G, Z>::new(&ccs_shape, &commitment_W, X.as_slice(), rs.as_slice(), vs.as_slice())?;
 
         ccs_shape.is_satisfied_linearized::<Z>(&instance, &witness, &ck)?;
 
         // Change commitment.
         let invalid_commitment = commitment_W + commitment_W;
-        let instance = LCCSInstance::<G, Z>::new(&ccs_shape, &invalid_commitment, &X, &rs, &vs)?;
+        let instance = LCCSInstance::<G, Z>::new(&ccs_shape, &invalid_commitment, X.as_slice(), rs.as_slice(), vs.as_slice())?;
         assert_eq!(
             ccs_shape.is_satisfied_linearized(&instance, &witness, &ck),
             Err(Error::NotSatisfied)
@@ -1248,10 +1248,10 @@ mod tests {
 
         // Provide invalid witness.
         let invalid_W = to_field_elements::<G>(&[4, 9, 27, 30]);
-        let invalid_witness = CCSWitness::<G>::new(&ccs_shape, &invalid_W)?;
+        let invalid_witness = CCSWitness::<G>::new(&ccs_shape, invalid_W.as_slice())?;
         let commitment_invalid_W = invalid_witness.commit::<Z>(&ck);
 
-        let instance = LCCSInstance::<G, Z>::new(&ccs_shape, &commitment_invalid_W, &X, &rs, &vs)?;
+        let instance = LCCSInstance::<G, Z>::new(&ccs_shape, &commitment_invalid_W, X.as_slice(), rs.as_slice(), vs.as_slice())?;
         assert_eq!(
             ccs_shape.is_satisfied_linearized(&instance, &invalid_witness, &ck),
             Err(Error::NotSatisfied)
@@ -1259,7 +1259,7 @@ mod tests {
 
         // Provide invalid public input.
         let invalid_X = to_field_elements::<G>(&[1, 36]);
-        let instance = LCCSInstance::<G, Z>::new(&ccs_shape, &commitment_W, &invalid_X, &rs, &vs)?;
+        let instance = LCCSInstance::<G, Z>::new(&ccs_shape, &commitment_W, invalid_X.as_slice(), rs.as_slice(), vs.as_slice())?;
         assert_eq!(
             ccs_shape.is_satisfied_linearized(&instance, &witness, &ck),
             Err(Error::NotSatisfied)
@@ -1297,11 +1297,11 @@ mod tests {
 
         let X = to_field_elements::<G>(&[1, 35]);
         let W = to_field_elements::<G>(&[3, 9, 27, 30]);
-        let W2 = CCSWitness::<G>::new(&ccs_shape, &W)?;
+        let W2 = CCSWitness::<G>::new(&ccs_shape, W.as_slice())?;
 
         let commitment_W = W2.commit::<Z>(&ck);
 
-        let U2 = CCSInstance::<G, Z>::new(&ccs_shape, &commitment_W, &X)?;
+        let U2 = CCSInstance::<G, Z>::new(&ccs_shape, &commitment_W, X.as_slice())?;
 
         let s = safe_loglike!(NUM_CONSTRAINTS);
         let rs1: Vec<Fr> = (0..s).map(|_| Fr::rand(&mut rng)).collect();
@@ -1311,7 +1311,7 @@ mod tests {
             .map(|M| vec_to_mle(M.multiply_vec(&z1).as_slice()).evaluate::<G>(rs1.as_slice()))
             .collect();
 
-        let U1 = LCCSInstance::<G, Z>::new(&ccs_shape, &commitment_W, &X, &rs1, &vs1)?;
+        let U1 = LCCSInstance::<G, Z>::new(&ccs_shape, &commitment_W, X.as_slice(), rs1.as_slice(), vs1.as_slice())?;
         let W1 = W2.clone();
 
         let z2 = z1.clone();
@@ -1385,7 +1385,7 @@ mod tests {
         let rs1 = vec![Fr::rand(&mut rng), Fr::rand(&mut rng)];
         
         let W1_values = to_field_elements::<G>(&[3, 9, 27, 30]);
-        let W1 = CCSWitness::<G>::new(&shape, &W1_values)?;
+        let W1 = CCSWitness::<G>::new(&shape, W1_values.as_slice())?;
         let commitment_W1 = W1.commit::<Z>(&ck);
         
         // Create the second LCCS instance
@@ -1394,7 +1394,7 @@ mod tests {
         let rs2 = vec![Fr::rand(&mut rng), Fr::rand(&mut rng)];
         
         let W2_values = to_field_elements::<G>(&[5, 15, 45, 50]);
-        let W2 = CCSWitness::<G>::new(&shape, &W2_values)?;
+        let W2 = CCSWitness::<G>::new(&shape, W2_values.as_slice())?;
         let commitment_W2 = W2.commit::<Z>(&ck);
         
         tracing::debug!(target: TEST_TARGET, "2. Computing actual evaluation claims for test instances");
@@ -1692,7 +1692,7 @@ mod tests {
                 27 + i as i64, 
                 30 + i as i64
             ]);
-            let W = CCSWitness::<G>::new(&shape, &W_values)?;
+            let W = CCSWitness::<G>::new(&shape, W_values.as_slice())?;
             let commitment_W = W.commit::<Z>(&ck);
             
             // Compute actual vs values - call evaluate via Polynomial trait
@@ -1752,7 +1752,7 @@ mod tests {
             // No need for rho_squared anymore since we're using rho directly in the witness folding
             
             // Fold accumulator with next instance
-            acc_lccs = acc_lccs.fold_lccs(&instances[i], &rho, &sigmas_acc, &sigmas_next, &merged_rs)?;
+            acc_lccs = acc_lccs.fold_lccs(&instances[i], &rho, sigmas_acc.as_slice(), sigmas_next.as_slice(), merged_rs.as_slice())?;
             
             // Fold witnesses using the formula W' = rho * W1 + rho^2 * W2
             acc_witness = acc_witness.fold(&witnesses[i], &rho)?;
@@ -1766,7 +1766,7 @@ mod tests {
                 &shape, &folded_instances[i], &folded_witnesses[i], 
                 &folded_instances[i-1], &instances[i], 
                 &folded_witnesses[i-1], &witnesses[i], 
-                &rho, &sigmas_acc, &sigmas_next, &ck)?;
+                &rho, sigmas_acc.as_slice(), sigmas_next.as_slice(), &ck)?;
             
             assert!(verification_result, "Folded instance verification failed at step {}", i);
         }
