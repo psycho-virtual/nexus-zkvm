@@ -1,5 +1,5 @@
 mod fold_driver;
-mod fold_reducer;
+pub mod fold_reducer;
 pub mod hypernova_fold_reducer;
 pub mod circuit;
 
