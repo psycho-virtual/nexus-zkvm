@@ -6,6 +6,7 @@ impl Sha256Constraint {
     pub fn setupSHA256Matrices() -> Result<CCSShape, CCSError> {
         todo!()
     }
+
     pub fn synthesizeWitness<G: CurveGroup>(X: Vec<G::ScalarField>) -> Result<(Vec<G::ScalarField>, C::Commitment)> {
         todo!()
     }
