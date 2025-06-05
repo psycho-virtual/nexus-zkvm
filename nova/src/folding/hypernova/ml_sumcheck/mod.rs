@@ -10,8 +10,8 @@ use ark_crypto_primitives::sponge::{Absorb, CryptographicSponge};
 use ark_ff::PrimeField;
 use ark_std::{fmt::Display, marker::PhantomData};
 
-mod data_structures;
-pub(crate) mod protocol;
+pub mod data_structures;
+pub mod protocol;
 
 #[cfg(test)]
 mod tests;
