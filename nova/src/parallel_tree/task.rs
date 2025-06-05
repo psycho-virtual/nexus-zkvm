@@ -2,6 +2,7 @@
 #![allow(clippy::upper_case_acronyms)]
 
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
+use std::fmt::{self, Debug, Formatter};
 use super::block_pool::BufId;
 
 // -----------------------------------------------------------------------------
@@ -14,7 +15,7 @@ pub struct LeafTask {
     /// State of the leaf task:
     /// 0 = Not started
     /// 1 = Currently processing
-    /// 2 = Ready (buffer_id will be non-negative)
+    /// 2 = Processed and waiting for consumption (buffer_id will be non-negative)
     /// 3 = Being Consumed
     /// 4 = Consumed
     pub state: AtomicU32,
@@ -28,7 +29,7 @@ pub struct NodeTask {
     /// 1 = Got 1 child - waiting for the other
     /// 2 = Got 2 children and is ready to be used
     /// 3 = Currently processing
-    /// 4 = Ready (buffer_id will be non-negative)
+    /// 4 = Processed and waiting for consumption (buffer_id will be non-negative)
     /// 5 = Being Consumed
     /// 6 = Consumed
     pub state: AtomicU32,
@@ -39,7 +40,7 @@ pub mod leaf_state {
     pub const NOT_STARTED: u32 = 0;
     pub const PROCESSING: u32 = 1;
     pub const READY: u32 = 2;
-    pub const BEING_CONSUMED: u32 = 3;
+    pub const PROCESSED_WAITING_FOR_CONSUMPTION: u32 = 3;
     pub const CONSUMED: u32 = 4;
 }
 
@@ -49,7 +50,7 @@ pub mod node_state {
     pub const WAITING_ONE_CHILD: u32 = 1;
     pub const WAITING_BOTH_CHILDREN: u32 = 2;
     pub const PROCESSING: u32 = 3;
-    pub const READY: u32 = 4;
+    pub const PROCESSED_WAITING_FOR_CONSUMPTION: u32 = 4;
     pub const BEING_CONSUMED: u32 = 5;
     pub const CONSUMED: u32 = 6;
 }
@@ -99,7 +100,7 @@ impl LeafTask {
         self.state
             .compare_exchange(
                 leaf_state::READY,
-                leaf_state::BEING_CONSUMED,
+                leaf_state::PROCESSED_WAITING_FOR_CONSUMPTION,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
@@ -110,7 +111,7 @@ impl LeafTask {
     pub fn try_set_consumed(&self) -> bool {
         self.state
             .compare_exchange(
-                leaf_state::BEING_CONSUMED,
+                leaf_state::PROCESSED_WAITING_FOR_CONSUMPTION,
                 leaf_state::CONSUMED,
                 Ordering::AcqRel,
                 Ordering::Acquire,
@@ -150,6 +151,12 @@ impl LeafTask {
         } else {
             None
         }
+    }
+
+    /// Clear the buffer ID by setting it to -1
+    #[inline]
+    pub fn clear_buffer_id(&self) {
+        self.buffer_id.store(-1, Ordering::Release);
     }
 }
 
@@ -213,7 +220,7 @@ impl NodeTask {
         self.state
             .compare_exchange(
                 node_state::PROCESSING,
-                node_state::READY,
+                node_state::PROCESSED_WAITING_FOR_CONSUMPTION,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
@@ -223,7 +230,7 @@ impl NodeTask {
     pub fn try_start_consuming(&self) -> bool {
         self.state
             .compare_exchange(
-                node_state::READY,
+                node_state::PROCESSED_WAITING_FOR_CONSUMPTION,
                 node_state::BEING_CONSUMED,
                 Ordering::AcqRel,
                 Ordering::Acquire,
@@ -244,7 +251,7 @@ impl NodeTask {
 
     #[inline]
     pub fn is_ready(&self) -> bool {
-        self.state.load(Ordering::Acquire) == node_state::READY
+        self.state.load(Ordering::Acquire) == node_state::PROCESSED_WAITING_FOR_CONSUMPTION
     }
 
     #[inline]
@@ -279,6 +286,12 @@ impl NodeTask {
         } else {
             None
         }
+    }
+
+    /// Clear the buffer ID by setting it to -1
+    #[inline]
+    pub fn clear_buffer_id(&self) {
+        self.buffer_id.store(-1, Ordering::Release);
     }
 }
 
@@ -378,5 +391,90 @@ impl TaskHeap {
     #[inline]
     pub fn get_buf_id_if_ready(&self, index: usize) -> Option<BufId> {
         self.get(index)?.get_buf_id_if_ready()
+    }
+
+    /// Clear the buffer ID for the task at the given index
+    #[inline]
+    pub fn clear_buffer_id(&self, index: usize) {
+        if let Some(task) = self.get(index) {
+            match task {
+                Task::Leaf(leaf) => leaf.clear_buffer_id(),
+                Task::Node(node) => node.clear_buffer_id(),
+            }
+        }
+    }
+}
+
+impl Debug for TaskHeap {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        writeln!(f, "TaskHeap (size={}, leaves={}):", self.size, self.num_leaves)?;
+        writeln!(f, "Tree structure:")?;
+        
+        // Helper function to convert leaf state to string
+        let leaf_state_name = |state: u32| -> &'static str {
+            match state {
+                0 => "NotStarted",
+                1 => "Processing", 
+                2 => "Ready",
+                3 => "WaitingConsumption",
+                4 => "Consumed",
+                _ => "Unknown",
+            }
+        };
+        
+        // Helper function to convert node state to string
+        let node_state_name = |state: u32| -> &'static str {
+            match state {
+                0 => "NotStarted",
+                1 => "WaitingOne", 
+                2 => "WaitingBoth",
+                3 => "Processing",
+                4 => "WaitingConsumption",
+                5 => "BeingConsumed",
+                6 => "Consumed",
+                _ => "Unknown",
+            }
+        };
+        
+        // Print the tree level by level
+        let mut level = 0;
+        let mut nodes_in_level = 1;
+        let mut node_idx = 0;
+        
+        while node_idx < self.size {
+            write!(f, "Level {}: ", level)?;
+            
+            for i in 0..nodes_in_level {
+                if node_idx >= self.size {
+                    break;
+                }
+                
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                
+                match &self.tasks[node_idx] {
+                    Task::Leaf(leaf) => {
+                        let state = leaf.get_state();
+                        let state_name = leaf_state_name(state);
+                        let buf_id = leaf.get_buf_id().map(|id| id.to_string()).unwrap_or_else(|| "None".to_string());
+                        write!(f, "Leaf[{}]({}, buf={})", node_idx, state_name, buf_id)?;
+                    }
+                    Task::Node(node) => {
+                        let state = node.get_state();
+                        let state_name = node_state_name(state);
+                        let buf_id = node.get_buf_id().map(|id| id.to_string()).unwrap_or_else(|| "None".to_string());
+                        write!(f, "Node[{}]({}, buf={})", node_idx, state_name, buf_id)?;
+                    }
+                }
+                node_idx += 1;
+            }
+            writeln!(f)?;
+            
+            level += 1;
+            nodes_in_level *= 2;
+        }
+        
+        Ok(())
     }
 } 

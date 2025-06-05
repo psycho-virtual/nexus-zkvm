@@ -1,3 +1,4 @@
+use std::fmt::{self, Debug, Formatter};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -8,6 +9,7 @@ use crossbeam_queue::ArrayQueue;
 use super::block_pool::{BlockPool, Payload};
 use super::task::{Task, TaskHeap};
 use crate::fold_reducer::FoldReducer;
+use crate::parallel_tree::{BufHandle, BufId};
 
 // -----------------------------------------------------------------------------
 // Worker local state
@@ -41,10 +43,9 @@ pub trait WorkerParams {
 
 pub struct WorkerLocal<P: WorkerParams> {
     pub id: usize,
-    pub deque: DequeWorker<usize>, // Now stores indices into the TaskHeap
     pub ready_q: Arc<ArrayQueue<usize>>, // Indices of ready parent nodes
     pub leaf_queue: Arc<ArrayQueue<(P::LeafInput, usize)>>, // (leaf_data, node_index) pairs
-    pub task_heap: Arc<TaskHeap>,  // Shared heap of all tasks
+    pub task_heap: Arc<TaskHeap>,        // Shared heap of all tasks
     pub pool: Arc<BlockPool<P::Inner>>,
     pub reducer: Arc<
         dyn FoldReducer<
@@ -60,20 +61,10 @@ pub struct WorkerLocal<P: WorkerParams> {
 
 impl<P: WorkerParams> WorkerLocal<P> {
     /// Run the worker loop until the `stop` flag is set.
-    pub fn run(self, stop: Arc<AtomicUsize>, stealer_pool: Vec<Stealer<usize>>) {
-        let Self {
-            id,
-            deque,
-            ready_q,
-            leaf_queue,
-            task_heap,
-            pool,
-            reducer,
-        } = self;
-
+    pub fn run(self, stop: Arc<AtomicUsize>) {
         // Pin to a dedicated core if available.
         if let Some(core_ids) = core_affinity::get_core_ids() {
-            if let Some(core) = core_ids.get(id) {
+            if let Some(core) = core_ids.get(self.id) {
                 let _ = core_affinity::set_for_current(*core);
             }
         }
@@ -81,41 +72,14 @@ impl<P: WorkerParams> WorkerLocal<P> {
         // Main loop
         while stop.load(Ordering::Acquire) == 0 {
             // Priority 1 – ready tasks (tasks that are READY and need to be consumed)
-            if let Some(task_idx) = ready_q.pop() {
-                Self::process_inner_input(task_idx, &task_heap, &ready_q, &pool, &reducer);
+            if let Some(task_idx) = self.ready_q.pop() {
+                self.process_ready_inner_node(task_idx);
                 continue;
             }
 
-            // Priority 2 – own deque (parent state checking)
-            if let Some(node_idx) = deque.pop() {
-                Self::check_parent_state(node_idx, &task_heap, &ready_q, &deque, &pool, &reducer);
-                continue;
-            }
-
-            // Priority 3 – leaf input processing
-            if let Some((leaf_data, leaf_idx)) = leaf_queue.pop() {
-                Self::process_leaf_input(
-                    leaf_data, leaf_idx, &task_heap, &ready_q, &pool, &reducer,
-                );
-                continue;
-            }
-
-            // Priority 4 – steal from others
-            let mut stole = false;
-            for stealer in &stealer_pool {
-                match stealer.steal() {
-                    crossbeam_deque::Steal::Success(node_idx) => {
-                        Self::check_parent_state(
-                            node_idx, &task_heap, &ready_q, &deque, &pool, &reducer,
-                        );
-                        stole = true;
-                        break;
-                    }
-                    crossbeam_deque::Steal::Retry => { /* try next */ }
-                    crossbeam_deque::Steal::Empty => {}
-                }
-            }
-            if stole {
+            // Priority 2 – leaf input processing
+            if let Some((leaf_data, leaf_idx)) = self.leaf_queue.pop() {
+                self.process_leaf_input(leaf_data, leaf_idx);
                 continue;
             }
 
@@ -124,408 +88,10 @@ impl<P: WorkerParams> WorkerLocal<P> {
         }
     }
 
-
-    /// Check and update parent state when a child changes
-    #[inline]
-    fn check_parent_state(
-        node_idx: usize,
-        task_heap: &TaskHeap,
-        ready_q: &Arc<ArrayQueue<usize>>,
-        deque: &DequeWorker<usize>,
-        pool: &Arc<BlockPool<P::Inner>>,
-        reducer: &Arc<
-            dyn FoldReducer<
-                    2,
-                    StrictInst = P::LeafInput,
-                    AccInst = P::Inner,
-                    FoldProof = P::Proof,
-                    Error = P::Error,
-                > + Send
-                + Sync,
-        >,
-    ) {
-        if let Some(task) = task_heap.get(node_idx) {
-            if let Task::Node(node_task) = task {
-                // Only process nodes that are in WAITING_BOTH_CHILDREN state
-                if node_task.get_state() == super::task::node_state::WAITING_BOTH_CHILDREN {
-                    Self::try_compute_node(node_idx, task_heap, ready_q, deque, pool, reducer);
-                }
-            }
-        }
-    }
-
-    /// Try to compute a node's result when both children are ready
-    #[inline]
-    fn try_compute_node(
-        node_idx: usize,
-        task_heap: &TaskHeap,
-        ready_q: &Arc<ArrayQueue<usize>>,
-        deque: &DequeWorker<usize>,
-        pool: &Arc<BlockPool<P::Inner>>,
-        reducer: &Arc<
-            dyn FoldReducer<
-                    2,
-                    StrictInst = P::LeafInput,
-                    AccInst = P::Inner,
-                    FoldProof = P::Proof,
-                    Error = P::Error,
-                > + Send
-                + Sync,
-        >,
-    ) {
-        if let Some(task) = task_heap.get(node_idx) {
-            if let Task::Node(node_task) = task {
-                // Only process if the node is in WAITING_BOTH_CHILDREN state
-                if node_task.get_state() == super::task::node_state::WAITING_BOTH_CHILDREN {
-                    let left_idx = TaskHeap::left(node_idx);
-                    let right_idx = TaskHeap::right(node_idx);
-
-                    tracing::debug!(target: WORKER_TARGET,
-                        "🔄 Node {}: Attempting to compute result from children [{}, {}]",
-                        node_idx, left_idx, right_idx
-                    );
-
-                    // Get buffer IDs from children
-                    let left_buf_id = task_heap.get_buf_id_if_ready(left_idx);
-                    let right_buf_id = task_heap.get_buf_id_if_ready(right_idx);
-
-                    if let (Some(left_id), Some(right_id)) = (left_buf_id, right_buf_id) {
-                        tracing::debug!(target: WORKER_TARGET,
-                            "Node {}: Both children ready with buffer IDs [{}, {}]",
-                            node_idx, left_id, right_id
-                        );
-
-                        // Get handles to children's buffers
-                        if let (Some(mut left_handle), Some(right_handle)) =
-                            (pool.claim(left_id), pool.claim(right_id))
-                        {
-                            // Read accumulators from buffers
-                            let acc_left: P::Inner = left_handle.read();
-                            let acc_right: P::Inner = right_handle.read();
-
-                            tracing::debug!(target: WORKER_TARGET,
-                                "Node {}: Successfully read accumulator instances from buffers",
-                                node_idx
-                            );
-
-                            // Build the children array
-                            let acc_children: [P::Inner; 2] = [acc_left, acc_right];
-
-                            // Fold the accumulators with timing
-                            tracing::debug!(target: WORKER_TARGET,
-                                "Node {}: Starting fold_acc_acc operation...",
-                                node_idx
-                            );
-
-                            let fold_start = Instant::now();
-                            let fold_result = reducer.fold_acc_acc(&acc_children);
-                            let fold_time = fold_start.elapsed();
-
-                            match fold_result {
-                                Ok((parent_acc, _proof)) => {
-                                    tracing::debug!(target: WORKER_TARGET,
-                                        "✅ Node {}: fold_acc_acc completed successfully in {:?}",
-                                        node_idx, fold_time
-                                    );
-
-                                    // Reuse the left buffer for the parent result
-                                    left_handle.write(&parent_acc);
-                                    let parent_buf_id = left_handle.into_id();
-
-                                    // Release the right buffer back to the pool immediately
-                                    right_handle.release();
-
-                                    tracing::debug!(target: WORKER_TARGET,
-                                        "Node {}: Stored folded result in buffer {}, released buffer {}",
-                                        node_idx, parent_buf_id, right_id
-                                    );
-
-                                    // Try to start processing this node with the computed buffer
-                                    if node_task.try_start_processing(parent_buf_id) {
-                                        // Set this node to ready with the computed result
-                                        if node_task.try_set_ready() {
-                                            tracing::debug!(target: WORKER_TARGET,
-                                                "✅ Node {}: Successfully set to READY state",
-                                                node_idx
-                                            );
-
-                                            // For non-root nodes, DON'T add to ready queue - they should be consumed by their parent
-                                            // Only add to ready queue if this is the root node (has no parent)
-                                            if TaskHeap::parent(node_idx).is_none() {
-                                                let _ = ready_q.push(node_idx);
-                                                tracing::debug!(target: WORKER_TARGET,
-                                                    "Node {}: Root node added to ready queue",
-                                                    node_idx
-                                                );
-                                            }
-
-                                            // Notify parent that this child is now ready
-                                            // Only add to deque if both children are now ready
-                                            if let Some(parent_idx) = TaskHeap::parent(node_idx) {
-                                                if let Some(Task::Node(parent_node)) =
-                                                    task_heap.get(parent_idx)
-                                                {
-                                                    if parent_node.notify_child_ready() {
-                                                        // Both children are now ready, add parent to deque for processing
-                                                        deque.push(parent_idx);
-                                                        tracing::debug!(target: WORKER_TARGET,
-                                                            "Node {}: Notified parent {} (both children ready)",
-                                                            node_idx, parent_idx
-                                                        );
-                                                    }
-                                                }
-                                            }
-
-                                            // Mark children as consumed - their buffers are now managed by this node
-                                            // Left child's buffer is now owned by this node, right child's buffer was released
-                                            Self::try_consume_task(task_heap, left_idx);
-                                            Self::try_consume_task(task_heap, right_idx);
-
-                                            tracing::debug!(target: WORKER_TARGET,
-                                                "Node {}: Marked children [{}, {}] as consumed",
-                                                node_idx, left_idx, right_idx
-                                            );
-                                        } else {
-                                            tracing::warn!(target: WORKER_TARGET,
-                                                "❌ Node {}: Failed to set to ready state",
-                                                node_idx
-                                            );
-                                        }
-                                    } else {
-                                        tracing::warn!(target: WORKER_TARGET,
-                                            "❌ Node {}: Failed to start processing",
-                                            node_idx
-                                        );
-                                        // Release the buffer if we failed to start processing
-                                        if let Some(handle) = pool.claim(parent_buf_id) {
-                                            handle.release();
-                                        }
-                                    }
-                                }
-                                Err(err) => {
-                                    tracing::error!(target: WORKER_TARGET,
-                                        "❌ Node {}: fold_acc_acc failed in {:?}: {:?}",
-                                        node_idx, fold_time, err
-                                    );
-                                    // Keep the original buffers since folding failed
-                                }
-                            }
-                        } else {
-                            tracing::warn!(target: WORKER_TARGET,
-                                "❌ Node {}: Failed to claim child buffers [{}, {}]",
-                                node_idx, left_id, right_id
-                            );
-                        }
-                    } else {
-                        tracing::debug!(target: WORKER_TARGET,
-                            "Node {}: Children not ready - left_buf: {:?}, right_buf: {:?}",
-                            node_idx, left_buf_id, right_buf_id
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    #[inline]
-    fn process_inner_input(
-        inner_idx: usize,
-        task_heap: &TaskHeap,
-        ready_q: &Arc<ArrayQueue<usize>>,
-        pool: &Arc<BlockPool<P::Inner>>,
-        reducer: &Arc<
-            dyn FoldReducer<
-                    2,
-                    StrictInst = P::LeafInput,
-                    AccInst = P::Inner,
-                    FoldProof = P::Proof,
-                    Error = P::Error,
-                > + Send
-                + Sync,
-        >,
-    ) {
-        if let Some(task) = task_heap.get(inner_idx) {
-            if let Task::Node(node_task) = task {
-                // Only process nodes that are in READY state
-                if node_task.get_state() == super::task::node_state::READY {
-                    tracing::debug!(target: WORKER_TARGET,
-                        "🔄 Inner {}: Processing ready inner node...",
-                        inner_idx
-                    );
-
-                    let left_idx = TaskHeap::left(inner_idx);
-                    let right_idx = TaskHeap::right(inner_idx);
-
-                    // Get buffer IDs from children
-                    let left_buf_id = task_heap.get_buf_id_if_ready(left_idx);
-                    let right_buf_id = task_heap.get_buf_id_if_ready(right_idx);
-
-                    if let (Some(left_id), Some(right_id)) = (left_buf_id, right_buf_id) {
-                        tracing::debug!(target: WORKER_TARGET,
-                            "Inner {}: Both children ready with buffer IDs [{}, {}]",
-                            inner_idx, left_id, right_id
-                        );
-
-                        // Start consuming this node
-                        if node_task.try_start_consuming() {
-                            // Get handles to children's buffers
-                            if let (Some(mut left_handle), Some(right_handle)) =
-                                (pool.claim(left_id), pool.claim(right_id))
-                            {
-                                // Read accumulators from buffers
-                                let acc_left: P::Inner = left_handle.read();
-                                let acc_right: P::Inner = right_handle.read();
-
-                                tracing::debug!(target: WORKER_TARGET,
-                                    "Inner {}: Successfully read accumulator instances from buffers",
-                                    inner_idx
-                                );
-
-                                // Build the children array
-                                let acc_children: [P::Inner; 2] = [acc_left, acc_right];
-
-                                // Fold the accumulators with timing
-                                tracing::debug!(target: WORKER_TARGET,
-                                    "Inner {}: Starting fold_acc_acc operation...",
-                                    inner_idx
-                                );
-
-                                let fold_start = Instant::now();
-                                let fold_result = reducer.fold_acc_acc(&acc_children);
-                                let fold_time = fold_start.elapsed();
-
-                                match fold_result {
-                                    Ok((parent_acc, _proof)) => {
-                                        tracing::debug!(target: WORKER_TARGET,
-                                            "✅ Inner {}: fold_acc_acc completed successfully in {:?}",
-                                            inner_idx, fold_time
-                                        );
-
-                                        // Reuse the left buffer for the parent result
-                                        left_handle.write(&parent_acc);
-                                        let final_buf_id = left_handle.into_id();
-
-                                        // Release the right buffer back to the pool immediately
-                                        right_handle.release();
-
-                                        tracing::debug!(target: WORKER_TARGET,
-                                            "Inner {}: Stored folded result in buffer {}, released buffer {}",
-                                            inner_idx, final_buf_id, right_id
-                                        );
-
-                                        // Mark this node as consumed
-                                        if node_task.try_set_consumed() {
-                                            tracing::debug!(target: WORKER_TARGET,
-                                                "✅ Inner {}: Successfully consumed and stored folded data",
-                                                inner_idx
-                                            );
-
-                                            // For non-root nodes, notify parent that this child was consumed
-                                            if let Some(parent_idx) = TaskHeap::parent(inner_idx) {
-                                                if let Some(Task::Node(parent_node)) = task_heap.get(parent_idx) {
-                                                    // Check if parent should be notified for processing
-                                                    let parent_state = parent_node.get_state();
-                                                    if parent_state == super::task::node_state::WAITING_BOTH_CHILDREN {
-                                                        // Add parent to ready queue for potential processing
-                                                        let _ = ready_q.push(parent_idx);
-                                                        tracing::debug!(target: WORKER_TARGET,
-                                                            "Inner {}: Notified parent {} for potential processing",
-                                                            inner_idx, parent_idx
-                                                        );
-                                                    }
-                                                }
-                                            }
-
-                                            // Mark children as consumed - their buffers are now managed by this node
-                                            Self::try_consume_task(task_heap, left_idx);
-                                            Self::try_consume_task(task_heap, right_idx);
-
-                                            tracing::debug!(target: WORKER_TARGET,
-                                                "Inner {}: Marked children [{}, {}] as consumed",
-                                                inner_idx, left_idx, right_idx
-                                            );
-                                        } else {
-                                            tracing::warn!(target: WORKER_TARGET,
-                                                "❌ Inner {}: Failed to set consumed state",
-                                                inner_idx
-                                            );
-                                            
-                                            // Release the buffer since we failed to set consumed state
-                                            if let Some(release_handle) = pool.claim(final_buf_id) {
-                                                release_handle.release();
-                                            }
-                                        }
-                                    }
-                                    Err(err) => {
-                                        tracing::error!(target: WORKER_TARGET,
-                                            "❌ Inner {}: fold_acc_acc failed in {:?}: {:?}",
-                                            inner_idx, fold_time, err
-                                        );
-                                        // Keep the original buffers since folding failed
-                                        // Reset node state since we couldn't process it
-                                        node_task.state.store(super::task::node_state::READY, Ordering::Release);
-                                    }
-                                }
-                            } else {
-                                tracing::warn!(target: WORKER_TARGET,
-                                    "❌ Inner {}: Failed to claim child buffers [{}, {}]",
-                                    inner_idx, left_id, right_id
-                                );
-                                // Reset node state since we couldn't process it
-                                node_task.state.store(super::task::node_state::READY, Ordering::Release);
-                            }
-                        } else {
-                            tracing::warn!(target: WORKER_TARGET,
-                                "❌ Inner {}: Failed to start consuming",
-                                inner_idx
-                            );
-                        }
-                    } else {
-                        tracing::debug!(target: WORKER_TARGET,
-                            "Inner {}: Children not ready - left_buf: {:?}, right_buf: {:?}",
-                            inner_idx, left_buf_id, right_buf_id
-                        );
-                    }
-                } else {
-                    tracing::debug!(target: WORKER_TARGET,
-                        "Inner {}: Node not in READY state (state: {}), skipping",
-                        inner_idx, node_task.get_state()
-                    );
-                }
-            } else {
-                tracing::warn!(target: WORKER_TARGET,
-                    "❌ Inner {}: Expected node task, found leaf task",
-                    inner_idx
-                );
-            }
-        } else {
-            tracing::warn!(target: WORKER_TARGET,
-                "❌ Inner {}: Task not found in heap",
-                inner_idx
-            );
-        }
-    }
-
     /// Process leaf input data to produce a result
     #[inline]
-    fn process_leaf_input(
-        leaf_data: P::LeafInput,
-        leaf_idx: usize,
-        task_heap: &TaskHeap,
-        ready_q: &Arc<ArrayQueue<usize>>,
-        pool: &Arc<BlockPool<P::Inner>>,
-        reducer: &Arc<
-            dyn FoldReducer<
-                    2,
-                    StrictInst = P::LeafInput,
-                    AccInst = P::Inner,
-                    FoldProof = P::Proof,
-                    Error = P::Error,
-                > + Send
-                + Sync,
-        >,
-    ) {
-        if let Some(task) = task_heap.get(leaf_idx) {
+    fn process_leaf_input(&self, leaf_data: P::LeafInput, leaf_idx: usize) {
+        if let Some(task) = self.task_heap.get(leaf_idx) {
             if let Task::Leaf(leaf_task) = task {
                 tracing::debug!(target: WORKER_TARGET,
                     "🌱 Leaf {}: Processing strict instance to accumulator...",
@@ -534,11 +100,11 @@ impl<P: WorkerParams> WorkerLocal<P> {
 
                 // Allocate a buffer from the pool with back-pressure
                 let handle = loop {
-                    if let Some(h) = pool.alloc() {
+                    if let Some(h) = self.pool.alloc() {
                         break h;
                     }
                     // No block available - yield to let other workers make progress
-                    if pool.free_count() == 0 {
+                    if self.pool.free_count() == 0 {
                         std::thread::yield_now();
                     }
                 };
@@ -548,15 +114,15 @@ impl<P: WorkerParams> WorkerLocal<P> {
                     leaf_idx
                 );
 
-                let buf_id = handle.into_id();
+                let buf_id = handle.into_id(); // TODO: issue is that the handle is being reused here
 
                 // Try to start processing this leaf with the allocated buffer
                 if leaf_task.try_start_processing(buf_id) {
                     // Convert leaf input to accumulator using reducer with timing
                     let convert_start = Instant::now();
-                    let convert_result = reducer.strict_to_acc(&leaf_data);
+                    let convert_result = self.reducer.strict_to_acc(&leaf_data);
                     let convert_time = convert_start.elapsed();
-                    
+
                     match convert_result {
                         Ok(acc) => {
                             tracing::debug!(target: WORKER_TARGET,
@@ -565,12 +131,12 @@ impl<P: WorkerParams> WorkerLocal<P> {
                             );
 
                             // Claim the buffer to write to it
-                            if let Some(mut write_handle) = pool.claim(buf_id) {
+                            if let Some(mut write_handle) = self.pool.claim(buf_id) {
                                 write_handle.write(&acc);
                                 // Convert back to buf_id (this consumes write_handle but keeps buffer allocated)
                                 let final_buf_id = write_handle.into_id();
                                 assert_eq!(buf_id, final_buf_id); // Sanity check
-                                
+
                                 // Try to update task state to Ready
                                 if leaf_task.try_set_ready() {
                                     tracing::debug!(target: WORKER_TARGET,
@@ -581,10 +147,12 @@ impl<P: WorkerParams> WorkerLocal<P> {
                                     // Notify parent that this child is ready
                                     // Only add to deque if both children are now ready
                                     if let Some(parent_idx) = TaskHeap::parent(leaf_idx) {
-                                        if let Some(Task::Node(parent_node)) = task_heap.get(parent_idx) {
+                                        if let Some(Task::Node(parent_node)) =
+                                            self.task_heap.get(parent_idx)
+                                        {
                                             if parent_node.notify_child_ready() {
                                                 // Both children are now ready, add parent to deque for processing
-                                                let _ = ready_q.push(parent_idx);
+                                                let _ = self.ready_q.push(parent_idx);
                                                 tracing::debug!(target: WORKER_TARGET,
                                                     "Leaf {}: Notified parent {} (both children ready)",
                                                     leaf_idx, parent_idx
@@ -599,12 +167,12 @@ impl<P: WorkerParams> WorkerLocal<P> {
                                     }
                                 } else {
                                     tracing::warn!(target: WORKER_TARGET,
-                                        "❌ Leaf {}: Failed to set to ready state",
+                                        "❌ Leaf {}: Failed to set ready state",
                                         leaf_idx
                                     );
-                                    
+
                                     // Release the buffer since we failed to set ready state
-                                    if let Some(release_handle) = pool.claim(buf_id) {
+                                    if let Some(release_handle) = self.pool.claim(final_buf_id) {
                                         release_handle.release();
                                     }
                                 }
@@ -623,11 +191,13 @@ impl<P: WorkerParams> WorkerLocal<P> {
                             );
 
                             // Reset leaf task state back to NOT_STARTED
-                            leaf_task.state.store(super::task::leaf_state::NOT_STARTED, Ordering::Release);
+                            leaf_task
+                                .state
+                                .store(super::task::leaf_state::NOT_STARTED, Ordering::Release);
                             leaf_task.buffer_id.store(-1, Ordering::Release);
 
                             // Release the buffer since conversion failed
-                            if let Some(release_handle) = pool.claim(buf_id) {
+                            if let Some(release_handle) = self.pool.claim(buf_id) {
                                 release_handle.release();
                             }
 
@@ -641,7 +211,7 @@ impl<P: WorkerParams> WorkerLocal<P> {
                         leaf_idx
                     );
                     // Failed to start processing - release the buffer
-                    if let Some(release_handle) = pool.claim(buf_id) {
+                    if let Some(release_handle) = self.pool.claim(buf_id) {
                         release_handle.release();
                     }
                 }
@@ -649,22 +219,271 @@ impl<P: WorkerParams> WorkerLocal<P> {
         }
     }
 
-    #[inline]
-    fn try_consume_task(task_heap: &TaskHeap, task_idx: usize) {
-        if let Some(task) = task_heap.get(task_idx) {
+    fn start_consuming_task_and_get_buf_handle(
+        &self,
+        task_idx: usize,
+    ) -> Option<BufHandle<P::Inner>> {
+        if let Some(task) = self.task_heap.get(task_idx) {
             match task {
-                Task::Leaf(leaf) => {
-                    if leaf.try_start_consuming() {
-                        let _ = leaf.try_set_consumed();
+                Task::Leaf(leaf_task) => {
+                    // Get buffer ID first while still in READY state
+                    if let Some(buf_id) = leaf_task.get_buf_id_if_ready() {
+                        if leaf_task.try_start_consuming() {
+                            // Get buffer handle after successfully starting consumption
+                            if let Some(handle) = self.pool.claim(buf_id) {
+                                tracing::debug!(target: WORKER_TARGET,
+                                    "Leaf {}: Successfully started consuming", task_idx
+                                );
+                                tracing::debug!(target: WORKER_TARGET,
+                                    "Leaf {}: Buffer id: {:?}", task_idx, buf_id
+                                );
+                                return Some(handle);
+                            }
+                        }
                     }
                 }
-                Task::Node(node) => {
-                    if node.try_start_consuming() {
-                        let _ = node.try_set_consumed();
+                Task::Node(node_task) => {
+                    // Get buffer ID first while still in READY state
+                    if let Some(buf_id) = node_task.get_buf_id_if_ready() {
+                        if node_task.try_start_consuming() {
+                            // Get buffer handle after successfully starting consumption
+                            if let Some(handle) = self.pool.claim(buf_id) {
+                                tracing::debug!(target: WORKER_TARGET,
+                                    "Node {}: Successfully started consuming", task_idx
+                                );
+                                tracing::debug!(target: WORKER_TARGET,
+                                    "Node {}: Buffer id: {:?}", task_idx, buf_id
+                                );
+                                return Some(handle);
+                            }
+                        }
                     }
                 }
             }
         }
+        None
+    }
+
+    #[inline]
+    fn process_ready_inner_node(&self, inner_idx: usize) {
+        println!("DEBUG: Processing ready inner node {}", inner_idx);
+        if let Some(task) = self.task_heap.get(inner_idx) {
+            if let Task::Node(node_task) = task {
+                println!("DEBUG: Node {} state: {}", inner_idx, node_task.get_state());
+                // Only process nodes that are in WAITING_BOTH_CHILDREN state (both children ready)
+                if node_task.get_state() == super::task::node_state::WAITING_BOTH_CHILDREN {
+                    tracing::debug!(target: WORKER_TARGET,
+                        "🔄 Inner {}: Processing ready inner node...",
+                        inner_idx
+                    );
+
+                    let left_idx = TaskHeap::left(inner_idx);
+                    let right_idx = TaskHeap::right(inner_idx);
+
+                    // Get buffer handles from children
+                    let left_handle = self.start_consuming_task_and_get_buf_handle(left_idx);
+                    let right_handle = self.start_consuming_task_and_get_buf_handle(right_idx);
+
+                    if let (Some(left_handle), Some(right_handle)) = (left_handle, right_handle) {
+                        tracing::debug!(target: WORKER_TARGET,
+                            "Inner {}: Both children ready with buffer handles",
+                            inner_idx
+                        );
+
+                        // Read accumulators from buffers
+                        let acc_left: P::Inner = left_handle.read();
+                        let acc_right: P::Inner = right_handle.read();
+
+                        tracing::debug!(target: WORKER_TARGET,
+                            "Inner {}: Successfully read accumulator instances from buffers",
+                            inner_idx
+                        );
+
+                        // Build the children array
+                        let acc_children: [P::Inner; 2] = [acc_left, acc_right];
+
+                        // Fold the accumulators with timing
+                        tracing::debug!(target: WORKER_TARGET,
+                            "Inner {}: Starting fold_acc_acc operation...",
+                            inner_idx
+                        );
+
+                        let fold_start = Instant::now();
+                        let fold_result = self.reducer.fold_acc_acc(&acc_children);
+                        let fold_time = fold_start.elapsed();
+
+                        match fold_result {
+                            Ok((parent_acc, _proof)) => {
+                                tracing::debug!(target: WORKER_TARGET,
+                                    "✅ Inner {}: fold_acc_acc completed successfully in {:?}",
+                                    inner_idx, fold_time
+                                );
+
+                                // TODO: We have to set consuming for the left child and the right child. We also should deallocate the buf_id that they contain as well in the task heap elements that they are in
+                                Self::set_consumed_task(&self.task_heap, left_idx);
+                                Self::set_consumed_task(&self.task_heap, right_idx);
+                                self.task_heap.clear_buffer_id(left_idx);
+                                self.task_heap.clear_buffer_id(right_idx);
+
+                                // Reuse the left buffer for the result, free the right buffer
+                                let mut result_handle = left_handle;
+                                right_handle.release();
+
+                                // Write result to the reused buffer
+                                result_handle.write(&parent_acc);
+                                let result_buf_id = result_handle.into_id();
+
+                                // First transition to PROCESSING state
+                                if node_task.try_start_processing(result_buf_id) {
+                                    // Then transition to READY state
+                                    if node_task.try_set_ready() {
+                                        println!(
+                                            "DEBUG: Node {} successfully set to ready state",
+                                            inner_idx
+                                        );
+                                        tracing::debug!(target: WORKER_TARGET,
+                                            "✅ Inner {}: Successfully set to READY state",
+                                            inner_idx
+                                        );
+
+                                        // For non-root nodes, notify parent that this child is ready
+                                        if let Some(parent_idx) = TaskHeap::parent(inner_idx) {
+                                            if let Some(Task::Node(parent_node)) =
+                                                self.task_heap.get(parent_idx)
+                                            {
+                                                if parent_node.notify_child_ready() {
+                                                    // Both children are now ready, add parent to deque for processing
+                                                    let _ = self.ready_q.push(parent_idx);
+                                                    println!("DEBUG: Added parent {} to ready queue (notified by inner {})", parent_idx, inner_idx);
+                                                    tracing::debug!(target: WORKER_TARGET,
+                                                        "Inner {}: Notified parent {} (both children ready)",
+                                                        inner_idx, parent_idx
+                                                    );
+                                                } else {
+                                                    println!("DEBUG: Notified parent {} but still waiting for sibling (notified by inner {})", parent_idx, inner_idx);
+                                                    tracing::debug!(target: WORKER_TARGET,
+                                                        "Inner {}: Notified parent {} (waiting for sibling)",
+                                                        inner_idx, parent_idx
+                                                    );
+                                                }
+                                            }
+                                        }
+
+                                        // For root node, mark children as consumed but keep root in ready state
+                                        // For non-root nodes, just stay in ready state until parent consumes them
+                                        if inner_idx == 0 {
+                                            // Root node: mark children as consumed but keep root in READY state
+                                            Self::set_consumed_task(&self.task_heap, left_idx);
+                                            Self::set_consumed_task(&self.task_heap, right_idx);
+
+                                            tracing::debug!(target: WORKER_TARGET,
+                                                "Root {}: Marked children [{}, {}] as consumed, keeping root in READY state",
+                                                inner_idx, left_idx, right_idx
+                                            );
+                                        }
+                                        // Note: Non-root nodes stay in READY state until their parent processes them
+                                    } else {
+                                        tracing::error!(target: WORKER_TARGET,
+                                            "❌ Inner {}: Failed to set ready state",
+                                            inner_idx
+                                        );
+
+                                        // Reset processing state back to WAITING_BOTH_CHILDREN
+                                        node_task.state.store(
+                                            super::task::node_state::WAITING_BOTH_CHILDREN,
+                                            Ordering::Release,
+                                        );
+                                        node_task.buffer_id.store(-1, Ordering::Release);
+
+                                        // Release the buffer since we failed
+                                        if let Some(release_handle) = self.pool.claim(result_buf_id) {
+                                            release_handle.release();
+                                        }
+                                    }
+                                } else {
+                                    tracing::error!(target: WORKER_TARGET,
+                                        "❌ Inner {}: Failed to start processing",
+                                        inner_idx
+                                    );
+
+                                    // Reset state back to WAITING_BOTH_CHILDREN and clear buffer
+                                    node_task.state.store(
+                                        super::task::node_state::WAITING_BOTH_CHILDREN,
+                                        Ordering::Release,
+                                    );
+
+                                    // Release the buffer since we failed to start processing
+                                    if let Some(release_handle) = self.pool.claim(result_buf_id) {
+                                        release_handle.release();
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                tracing::error!(target: WORKER_TARGET,
+                                    "❌ Inner {}: fold_acc_acc failed in {:?}: {:?}",
+                                    inner_idx, fold_time, err
+                                );
+
+                                // Release both buffers since folding failed - use original handles
+                                left_handle.release();
+                                right_handle.release();
+                            }
+                        }
+                    } else {
+                        tracing::debug!(target: WORKER_TARGET,
+                            "Inner {}: Children not ready or failed to start consuming",
+                            inner_idx
+                        );
+                    }
+                } else {
+                    tracing::debug!(target: WORKER_TARGET,
+                        "Inner {}: Node not in WAITING_BOTH_CHILDREN state (state: {}), skipping",
+                        inner_idx, node_task.get_state()
+                    );
+                }
+            } else {
+                tracing::warn!(target: WORKER_TARGET,
+                    "❌ Inner {}: Expected node task, found leaf task",
+                    inner_idx
+                );
+            }
+        } else {
+            tracing::warn!(target: WORKER_TARGET,
+                "❌ Inner {}: Task not found in heap",
+                inner_idx
+            );
+        }
+    }
+
+    #[inline]
+    fn set_consumed_task(task_heap: &TaskHeap, task_idx: usize) {
+        if let Some(task) = task_heap.get(task_idx) {
+            match task {
+                Task::Leaf(leaf) => {
+                    leaf.try_set_consumed();
+                }
+                Task::Node(node) => {
+                    node.try_set_consumed();
+                }
+            }
+        }
+    }
+}
+
+impl<P: WorkerParams> Debug for WorkerLocal<P> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        writeln!(f, "Worker[{}] State:", self.id)?;
+
+        // Show ready queue
+        writeln!(f, "  Ready Queue (len={}):", self.ready_q.len())?;
+
+        // Show leaf queue
+        writeln!(f, "  Leaf Queue (len={}):", self.leaf_queue.len())?;
+
+        // Show pool info
+        writeln!(f, "  Pool: {} free buffers", self.pool.free_count())?;
+
+        Ok(())
     }
 }
 
@@ -752,37 +571,44 @@ mod tests {
 
         let stop = Arc::new(AtomicUsize::new(0));
 
-        // Spawn the worker thread
+        // Create a debug worker to show state
+        let reducer_arc: Arc<
+            dyn FoldReducer<
+                    2,
+                    StrictInst = LeafPayload,
+                    AccInst = LeafPayload,
+                    FoldProof = (),
+                    Error = (),
+                > + Send
+                + Sync,
+        > = Arc::new(SimpleReducer);
+
+        let debug_worker = WorkerLocal::<TestWorkerParams> {
+            id: 999, // Debug worker ID
+            ready_q: ready_q.clone(),
+            leaf_queue: leaf_queue.clone(),
+            task_heap: task_heap.clone(),
+            pool: pool.clone(),
+            reducer: reducer_arc.clone(),
+        };
+
+        // Spawn worker.
         let worker_thread = {
-            let ready_q_clone = ready_q.clone();
-            let leaf_queue_clone = leaf_queue.clone();
-            let task_heap_clone = task_heap.clone();
-            let pool_clone = pool.clone();
-            let stop_clone = stop.clone();
-
-            thread::spawn(move || {
-                let reducer_arc: Arc<
-                    dyn FoldReducer<
-                            2,
-                            StrictInst = LeafPayload,
-                            AccInst = LeafPayload,
-                            FoldProof = (),
-                            Error = (),
-                        > + Send
-                        + Sync,
-                > = Arc::new(SimpleReducer);
-
+            let ready_q_c = ready_q.clone();
+            let leaf_q_c = leaf_queue.clone();
+            let task_heap_c = task_heap.clone();
+            let pool_c = pool.clone();
+            let stop_c = stop.clone();
+            std::thread::spawn(move || {
                 let worker = WorkerLocal::<TestWorkerParams> {
                     id: 0,
-                    deque: crossbeam_deque::Worker::new_fifo(),
-                    ready_q: ready_q_clone,
-                    leaf_queue: leaf_queue_clone,
-                    task_heap: task_heap_clone,
-                    pool: pool_clone,
+                    ready_q: ready_q_c,
+                    leaf_queue: leaf_q_c,
+                    task_heap: task_heap_c,
+                    pool: pool_c,
                     reducer: reducer_arc,
                 };
-
-                worker.run(stop_clone, Vec::new());
+                worker.run(stop_c);
             })
         };
 
@@ -846,37 +672,44 @@ mod tests {
 
         let stop = Arc::new(AtomicUsize::new(0));
 
-        // Spawn the worker thread
+        // Create a debug worker to show state
+        let reducer_arc: Arc<
+            dyn FoldReducer<
+                    2,
+                    StrictInst = LeafPayload,
+                    AccInst = LeafPayload,
+                    FoldProof = (),
+                    Error = (),
+                > + Send
+                + Sync,
+        > = Arc::new(SimpleReducer);
+
+        let debug_worker = WorkerLocal::<TestWorkerParams> {
+            id: 999, // Debug worker ID
+            ready_q: ready_q.clone(),
+            leaf_queue: leaf_queue.clone(),
+            task_heap: task_heap.clone(),
+            pool: pool.clone(),
+            reducer: reducer_arc.clone(),
+        };
+
+        // Spawn worker.
         let worker_thread = {
-            let ready_q_clone = ready_q.clone();
-            let leaf_queue_clone = leaf_queue.clone();
-            let task_heap_clone = task_heap.clone();
-            let pool_clone = pool.clone();
-            let stop_clone = stop.clone();
-
-            thread::spawn(move || {
-                let reducer_arc: Arc<
-                    dyn FoldReducer<
-                            2,
-                            StrictInst = LeafPayload,
-                            AccInst = LeafPayload,
-                            FoldProof = (),
-                            Error = (),
-                        > + Send
-                        + Sync,
-                > = Arc::new(SimpleReducer);
-
+            let ready_q_c = ready_q.clone();
+            let leaf_q_c = leaf_queue.clone();
+            let task_heap_c = task_heap.clone();
+            let pool_c = pool.clone();
+            let stop_c = stop.clone();
+            std::thread::spawn(move || {
                 let worker = WorkerLocal::<TestWorkerParams> {
                     id: 0,
-                    deque: crossbeam_deque::Worker::new_fifo(),
-                    ready_q: ready_q_clone,
-                    leaf_queue: leaf_queue_clone,
-                    task_heap: task_heap_clone,
-                    pool: pool_clone,
+                    ready_q: ready_q_c,
+                    leaf_queue: leaf_q_c,
+                    task_heap: task_heap_c,
+                    pool: pool_c,
                     reducer: reducer_arc,
                 };
-
-                worker.run(stop_clone, Vec::new());
+                worker.run(stop_c);
             })
         };
 
@@ -885,18 +718,9 @@ mod tests {
         for i in 0..1000 {
             // Debug: print states every 100 iterations
             if i % 100 == 0 {
-                if let Some(Task::Leaf(left_leaf)) = task_heap.get(left_idx) {
-                    println!("Left leaf state: {}", left_leaf.get_state());
-                }
-                if let Some(Task::Leaf(right_leaf)) = task_heap.get(right_idx) {
-                    println!("Right leaf state: {}", right_leaf.get_state());
-                }
-                if let Some(Task::Node(parent_node)) = task_heap.get(parent_idx) {
-                    println!("Parent state: {}", parent_node.get_state());
-                }
-                println!("Ready queue len: {}", ready_q.len());
-                println!("Leaf queue len: {}", leaf_queue.len());
-                println!("Pool free count: {}", pool.free_count());
+                println!("--- Iteration {} ---", i);
+                println!("{:?}", &*task_heap);
+                println!("{:?}", debug_worker);
                 println!("---");
             }
 
@@ -915,7 +739,9 @@ mod tests {
 
             let root_correct = if let Some(Task::Node(parent_node)) = task_heap.get(parent_idx) {
                 // Root should be in READY state (not consumed) and have correct value
-                if parent_node.get_state() == crate::parallel_tree::task::node_state::READY {
+                if parent_node.get_state()
+                    == crate::parallel_tree::task::node_state::PROCESSED_WAITING_FOR_CONSUMPTION
+                {
                     if let Some(buf_id) = parent_node.get_buf_id_if_ready() {
                         if let Some(handle) = pool.claim(buf_id) {
                             let acc = handle.read();
@@ -970,7 +796,7 @@ mod tests {
         if let Some(Task::Node(parent_node)) = task_heap.get(parent_idx) {
             assert_eq!(
                 parent_node.get_state(),
-                crate::parallel_tree::task::node_state::READY,
+                crate::parallel_tree::task::node_state::PROCESSED_WAITING_FOR_CONSUMPTION,
                 "Root should be ready (not consumed)"
             );
             if let Some(buf_id) = parent_node.get_buf_id_if_ready() {
@@ -1035,21 +861,32 @@ mod tests {
 
                 let worker = WorkerLocal::<TestWorkerParams> {
                     id: 0,
-                    deque: crossbeam_deque::Worker::new_fifo(),
                     ready_q: ready_q_c,
                     leaf_queue: leaf_q_c,
                     task_heap: task_heap_c,
                     pool: pool_c,
                     reducer: reducer_arc,
                 };
-                worker.run(stop_c, Vec::new());
+                worker.run(stop_c);
             })
         };
 
         // Wait until all processing is complete
         let mut all_processed = false;
-        for _ in 0..2000 {
-            // ~2s
+        for i in 0..2000 {
+            // Debug: print worker and task heap state every 200 iterations
+            if i % 200 == 0 {
+                println!("--- Iteration {} ---", i);
+                println!("{:?}", &*task_heap);
+                println!(
+                    "Worker queues: ready_q_len={}, leaf_q_len={}, pool_free={}",
+                    ready_q.len(),
+                    leaf_queue.len(),
+                    pool.free_count()
+                );
+                println!("---");
+            }
+
             // Check if all non-root nodes are consumed and root has correct value
             let mut all_non_root_consumed = true;
 
@@ -1073,7 +910,9 @@ mod tests {
 
             // Check if root has correct value and is in READY state
             let root_correct = if let Some(Task::Node(root_node)) = task_heap.get(0) {
-                if root_node.get_state() == crate::parallel_tree::task::node_state::READY {
+                if root_node.get_state()
+                    == crate::parallel_tree::task::node_state::PROCESSED_WAITING_FOR_CONSUMPTION
+                {
                     if let Some(buf_id) = root_node.get_buf_id_if_ready() {
                         if let Some(handle) = pool.claim(buf_id) {
                             let acc = handle.read();
@@ -1136,7 +975,7 @@ mod tests {
         if let Some(Task::Node(root_node)) = task_heap.get(0) {
             assert_eq!(
                 root_node.get_state(),
-                crate::parallel_tree::task::node_state::READY,
+                crate::parallel_tree::task::node_state::PROCESSED_WAITING_FOR_CONSUMPTION,
                 "Root should be ready (not consumed)"
             );
             if let Some(buf_id) = root_node.get_buf_id_if_ready() {

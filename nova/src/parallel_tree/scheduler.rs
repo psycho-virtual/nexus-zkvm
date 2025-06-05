@@ -138,7 +138,6 @@ where
 
         let mut worker_handles = Vec::with_capacity(num_cores);
         let mut stealers: Vec<Stealer<usize>> = Vec::with_capacity(num_cores);
-        let mut deques: Vec<DequeWorker<usize>> = Vec::with_capacity(num_cores);
         let mut ready_queues = Vec::with_capacity(num_cores);
         let mut leaf_queues: Vec<Arc<ArrayQueue<(L, usize)>>> = Vec::with_capacity(num_cores);
 
@@ -146,7 +145,6 @@ where
         for _ in 0..num_cores {
             let deque = DequeWorker::new_lifo();
             stealers.push(deque.stealer());
-            deques.push(deque);
             ready_queues.push(Arc::new(ArrayQueue::new(READY_Q_CAP)));
             leaf_queues.push(Arc::new(ArrayQueue::new(READY_Q_CAP)));
         }
@@ -157,26 +155,23 @@ where
 
         for id in 0..num_cores {
             // Move the deque out of the vector
-            let deque = deques.pop().expect("deque missing");
             let ready_q = ready_queues[id].clone();
             let leaf_queue = leaf_queues[id].clone();
             let pool_clone = pool_arc.clone();
             let reducer_clone = reducer_arc.clone();
             let task_heap_clone = task_heap_arc.clone();
             let stop_flag = stop.clone();
-            let stealers_clone = stealers.clone();
 
             let handle = std::thread::spawn(move || {
                 let worker = WorkerLocal::<SchedulerParams<L, P, Proof, Error>> {
                     id,
-                    deque,
                     ready_q,
                     leaf_queue,
                     task_heap: task_heap_clone,
                     pool: pool_clone,
                     reducer: reducer_clone,
                 };
-                worker.run(stop_flag, stealers_clone);
+                worker.run(stop_flag);
             });
             worker_handles.push(handle);
         }
@@ -231,7 +226,7 @@ where
     pub fn is_computation_complete(&self) -> bool {
         // Check if root is ready
         let root_ready = if let Some(super::task::Task::Node(root_node)) = self.task_heap.get(0) {
-            root_node.get_state() == super::task::node_state::READY
+            root_node.get_state() == super::task::node_state::PROCESSED_WAITING_FOR_CONSUMPTION
         } else {
             false
         };

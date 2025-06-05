@@ -172,11 +172,6 @@ impl<P: Payload> BlockPool<P> {
         }
     }
 
-    /// Public accessor for the size of each block.
-    pub fn block_size(&self) -> usize {
-        self.block_size
-    }
-
     /// Return the current number of free blocks available.  This is an
     /// O(1) call on the underlying `SegQueue` and therefore cheap enough to
     /// poll from tight back‐pressure loops.
@@ -233,7 +228,7 @@ impl<'a, P: Payload> BufHandle<'a, P> {
 
     /// Expose the pool's block size for tests/debug.
     pub fn block_size(&self) -> usize {
-        self.pool.block_size()
+        self.pool.block_size
     }
 
     /// Read and decode the payload stored in this buffer and return it.
@@ -356,7 +351,7 @@ mod tests {
         let ptr2 = pool.map_mut(id2).as_ptr() as usize;
         let diff = ptr1.abs_diff(ptr2);
         assert!(
-            diff >= pool.block_size(),
+            diff >= pool.block_size,
             "buffers for different BufIds overlap (diff={diff})"
         );
     }
