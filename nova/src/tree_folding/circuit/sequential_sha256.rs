@@ -8,6 +8,8 @@ use crate::circuits::nova::StepCircuit;
 use std::marker::PhantomData;
 use std::time::Instant;
 use ark_std::Zero;
+use tracing::{debug, info};
+use tracing_test::traced_test;
 
 /// A circuit for sequential SHA-256 hash operations
 /// Each step takes the previous hash as input and produces a new hash
@@ -34,7 +36,7 @@ impl<F: PrimeField> StepCircuit<F> for SequentialSha256Circuit<F> {
         _i: &FpVar<F>,
         z: &[FpVar<F>],
     ) -> Result<Vec<FpVar<F>>, SynthesisError> {
-        println!("Starting constraint generation for SHA-256 step");
+        info!("Starting constraint generation for SHA-256 step");
         let constraint_start = Instant::now();
         
         // Extract the current state (previous hash)
@@ -44,20 +46,20 @@ impl<F: PrimeField> StepCircuit<F> for SequentialSha256Circuit<F> {
         let state_bytes = match current_state.value() {
             Ok(val) => {
                 let bytes = conversions::field_to_bytes(&val);
-                println!("Input state value available, converted to bytes of length {}", bytes.len());
+                debug!("Input state value available, converted to bytes of length {}", bytes.len());
                 bytes
             },
             Err(_) => {
-                println!("Input state value not available, using default bytes");
+                debug!("Input state value not available, using default bytes");
                 vec![0u8; 32] // Default for constraint generation
             },
         };
 
-        println!("Creating SHA-256 circuit instance for constraint generation");
+        debug!("Creating SHA-256 circuit instance for constraint generation");
         // Create a SHA-256 circuit for this step using the previous hash as input
         let sha_circuit = Sha256Circuit::<F>::new(&state_bytes);
 
-        println!("Generating constraints for SHA-256 operation");
+        debug!("Generating constraints for SHA-256 operation");
         let inner_constraint_start = Instant::now();
         
         // Generate constraints for the SHA-256 operation directly
@@ -67,21 +69,21 @@ impl<F: PrimeField> StepCircuit<F> for SequentialSha256Circuit<F> {
         let result = sha_circuit.generate_constraints(cs.clone(), &dummy_fp_var, &empty_vec)?;
         
         let inner_constraint_duration = inner_constraint_start.elapsed();
-        println!("SHA-256 constraints generated in {:?}", inner_constraint_duration);
+        debug!("SHA-256 constraints generated in {:?}", inner_constraint_duration);
         
         // Log constraint system information
         let num_constraints = cs.num_constraints();
         let num_instance_variables = cs.num_instance_variables();
         let num_witness_variables = cs.num_witness_variables();
         
-        println!("Constraint system stats: {} constraints, {} instance variables, {} witness variables",
+        debug!("Constraint system stats: {} constraints, {} instance variables, {} witness variables",
             num_constraints,
             num_instance_variables,
             num_witness_variables
         );
 
         let constraint_duration = constraint_start.elapsed();
-        println!("SHA-256 step constraint generation completed in {:?}", constraint_duration);
+        info!("SHA-256 step constraint generation completed in {:?}", constraint_duration);
 
         Ok(result)
     }
@@ -89,13 +91,13 @@ impl<F: PrimeField> StepCircuit<F> for SequentialSha256Circuit<F> {
 
 /// Run and verify a sequential chain using only native SHA-256 for comparison
 pub fn run_native_sequential_sha256(initial_message: &[u8], steps: usize) -> Vec<u8> {
-    println!("\n[Native Sequential] Running {} native SHA-256 operations for comparison", steps);
-    println!("Running native sequential SHA-256 for {} steps (for comparison)", steps);
+    info!("\n[Native Sequential] Running {} native SHA-256 operations for comparison", steps);
+    info!("Running native sequential SHA-256 for {} steps (for comparison)", steps);
 
     // Calculate initial hash
     let mut current_hash = calculate_sha256_native(initial_message);
     let current_hash_hex = current_hash.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join("");
-    println!("Initial hash (hex): {}", current_hash_hex);
+    debug!("Initial hash (hex): {}", current_hash_hex);
 
     // Perform sequential steps
     for i in 0..steps {
@@ -104,8 +106,8 @@ pub fn run_native_sequential_sha256(initial_message: &[u8], steps: usize) -> Vec
         let hash_duration = hash_start.elapsed();
         
         let hash_hex = current_hash.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join("");
-        println!("Native step {}/{}: Hash calculated in {:?}", i + 1, steps, hash_duration);
-        println!("    Hash at step {} (hex): {}", i + 1, hash_hex);
+        debug!("Native step {}/{}: Hash calculated in {:?}", i + 1, steps, hash_duration);
+        debug!("    Hash at step {} (hex): {}", i + 1, hash_hex);
     }
 
     current_hash
@@ -118,6 +120,7 @@ mod tests {
     use ark_relations::r1cs::ConstraintSystem;
     use ark_r1cs_std::alloc::AllocVar;
     use std::time::Duration;
+    use tracing_test::traced_test;
 
     // Helper function to create a fresh constraint system
     fn create_constraint_system() -> ConstraintSystemRef<Fr> {
@@ -133,9 +136,10 @@ mod tests {
         (i_var, z_var)
     }
 
+    #[traced_test]
     #[test]
     fn test_sequential_sha256_circuit_creation() {
-        println!("Testing sequential SHA-256 circuit creation");
+        info!("Testing sequential SHA-256 circuit creation");
         
         // Test that we can create the circuit
         let _circuit = SequentialSha256Circuit::<Fr>::new();
@@ -143,12 +147,13 @@ mod tests {
         // Verify the ARITY is correct
         assert_eq!(SequentialSha256Circuit::<Fr>::ARITY, 1);
         
-        println!("✓ Sequential SHA-256 circuit creation test passed");
+        info!("✓ Sequential SHA-256 circuit creation test passed");
     }
 
+    #[traced_test]
     #[test]
     fn test_constraint_generation() {
-        println!("Testing constraint generation for sequential SHA-256 circuit");
+        info!("Testing constraint generation for sequential SHA-256 circuit");
         
         let circuit = SequentialSha256Circuit::<Fr>::new();
         let cs = create_constraint_system();
@@ -162,7 +167,7 @@ mod tests {
         let elapsed = start.elapsed();
         
         if elapsed > Duration::from_secs(30) {
-            println!("Warning: Constraint generation took longer than 30 seconds: {:?}", elapsed);
+            info!("Warning: Constraint generation took longer than 30 seconds: {:?}", elapsed);
         }
         
         // Check that constraint generation succeeds
@@ -173,15 +178,16 @@ mod tests {
         
         // Check that constraints were actually generated
         let num_constraints = cs.num_constraints();
-        println!("Generated {} constraints in {:?}", num_constraints, elapsed);
+        debug!("Generated {} constraints in {:?}", num_constraints, elapsed);
         assert!(num_constraints > 0, "Should generate some constraints");
         
-        println!("✓ Constraint generation test passed");
+        info!("✓ Constraint generation test passed");
     }
 
+    #[traced_test]
     #[test]
     fn test_native_sequential_sha256() {
-        println!("Testing native sequential SHA-256");
+        info!("Testing native sequential SHA-256");
         
         // Initial data to hash
         let initial_data = b"hello world".to_vec();
@@ -197,11 +203,11 @@ mod tests {
         let mut expected = calculate_sha256_native(&initial_data);
         for i in 0..steps {
             expected = calculate_sha256_native(&expected);
-            println!("Step {} hash: {:?}", i + 1, hex::encode(&expected));
+            debug!("Step {} hash: {:?}", i + 1, hex::encode(&expected));
         }
         
         assert_eq!(final_hash, expected, "Native sequential computation should match manual computation");
         
-        println!("✓ Native sequential SHA-256 test passed");
+        info!("✓ Native sequential SHA-256 test passed");
     }
 } 
