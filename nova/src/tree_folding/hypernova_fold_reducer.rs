@@ -2,6 +2,7 @@ use ark_crypto_primitives::sponge::{Absorb, CryptographicSponge};
 use ark_ec::CurveGroup;
 use ark_ff::{PrimeField, ToConstraintField, Zero};
 use std::time::Instant;
+use tracing::{debug, info};
 
 // Crate imports
 use crate::absorb::AbsorbEmulatedFp;
@@ -222,6 +223,7 @@ mod tests {
     use crate::poseidon_config;
     use crate::provider::zeromorph::Zeromorph;
     use hex;
+    use tracing_test::traced_test;
 
     // Type aliases for convenience - using BN254 (same as used in production)
     type G1 = BN254G1;
@@ -259,29 +261,30 @@ mod tests {
 
     // Helper function to set up the test environment
     fn setup_test_environment() -> (PCKey, ROConfig) {
-        println!("Setting up test environment");
+        info!("Setting up test environment");
         let mut rng = test_rng();
         
         // Setup SRS for Zeromorph - use larger degree for SHA-256 circuit
         let srs_degree = 4; // 2^4 = 262,144 coefficients
-        println!("Setting up SRS with degree {}", srs_degree);
+        info!("Setting up SRS with degree {}", srs_degree);
         let srs = Z::setup(srs_degree, b"test-hypernova-fold", &mut rng)
             .expect("Failed to set up SRS");
             
         // Trim SRS to get commitment key
-        println!("Trimming SRS");
+        debug!("Trimming SRS");
         let ck = Z::trim(&srs, srs_degree - 1).ck;
         
         // Setup random oracle
         let ro_config = poseidon_config::<CF>();
         
-        println!("Test environment setup complete");
+        info!("Test environment setup complete");
         (ck, ro_config)
     }
     
+    #[traced_test]
     #[test]
     fn test_hypernova_fold_reducer_creation() {
-        println!("Testing HypernovaFoldReducer type compilation");
+        info!("Testing HypernovaFoldReducer type compilation");
         
         let (ck, ro_config) = setup_test_environment();
         let circuit = CubicCircuit::<CF> { _phantom: PhantomData };
@@ -291,12 +294,13 @@ mod tests {
             setup_linearization(circuit).unwrap(), &ck, &ro_config
         );
         
-        println!("✅ Test for HypernovaFoldReducer type compilation passed");
+        info!("✅ Test for HypernovaFoldReducer type compilation passed");
     }
     
+    #[traced_test]
     #[test]
     fn test_strict_to_acc_conversion() {
-        println!("🚀 Starting strict-to-accumulator conversion test");
+        info!("🚀 Starting strict-to-accumulator conversion test");
         
         let (ck, ro_config) = setup_test_environment();
         let circuit = CubicCircuit::<CF> { _phantom: PhantomData };
@@ -306,7 +310,7 @@ mod tests {
             setup_linearization(circuit).unwrap(), &ck, &ro_config
         );
         
-        println!("📝 Testing strict to accumulator conversion...");
+        debug!("Testing strict to accumulator conversion...");
         
         // Create a step function input
         let input = StepFunctionInput {
@@ -314,7 +318,7 @@ mod tests {
             z_i: vec![CF::from(3u64)], // x = 3, so x^3 + x + 5 = 27 + 3 + 5 = 35
         };
         
-        println!("Input: i={}, z_i=[{}]", input.i, input.z_i[0]);
+        debug!("Input: i={}, z_i=[{}]", input.i, input.z_i[0]);
         
         let start_time = Instant::now();
         
@@ -322,23 +326,24 @@ mod tests {
         
         let conversion_time = start_time.elapsed();
         
-        println!("⏱️  STRICT-TO-ACC CONVERSION TIME: {:?}", conversion_time);
-        println!("📊 Conversion results:");
-        println!("   - LCCS instance X length: {}", lccs_instance.X.len());
-        println!("   - Witness W length: {}", witness.W.len());
-        println!("   - LCCS rs length: {}", lccs_instance.rs.len());
-        println!("   - LCCS vs length: {}", lccs_instance.vs.len());
+        info!("⏱️  STRICT-TO-ACC CONVERSION TIME: {:?}", conversion_time);
+        debug!("Conversion results:");
+        debug!("   - LCCS instance X length: {}", lccs_instance.X.len());
+        debug!("   - Witness W length: {}", witness.W.len());
+        debug!("   - LCCS rs length: {}", lccs_instance.rs.len());
+        debug!("   - LCCS vs length: {}", lccs_instance.vs.len());
         
         // The conversion should produce a valid LCCS instance
         assert!(!lccs_instance.X.is_empty(), "LCCS instance should have public inputs");
         assert!(!witness.W.is_empty(), "Witness should not be empty");
         
-        println!("✅ Strict to accumulator conversion succeeded");
+        info!("✅ Strict to accumulator conversion succeeded");
     }
     
+    #[traced_test]
     #[test]
     fn test_fold_two_acc_instances() {
-        println!("🚀 Starting accumulator folding test");
+        info!("🚀 Starting accumulator folding test");
         
         let (ck, ro_config) = setup_test_environment();
         let circuit = CubicCircuit::<CF> { _phantom: PhantomData };
@@ -348,7 +353,7 @@ mod tests {
             setup_linearization(circuit).unwrap(), &ck, &ro_config
         );
         
-        println!("📝 Creating accumulator instances...");
+        debug!("Creating accumulator instances...");
         
         // Create two step function inputs
         let input1 = StepFunctionInput {
@@ -361,63 +366,39 @@ mod tests {
             z_i: vec![CF::from(3u64)], // x = 3, so x^3 + x + 5 = 27 + 3 + 5 = 35
         };
         
-        println!("Instance 1: i={}, z_i=[{}]", input1.i, input1.z_i[0]);
-        println!("Instance 2: i={}, z_i=[{}]", input2.i, input2.z_i[0]);
+        debug!("Instance 1: i={}, z_i=[{}]", input1.i, input1.z_i[0]);
+        debug!("Instance 2: i={}, z_i=[{}]", input2.i, input2.z_i[0]);
         
         // Time the conversion of each strict instance to accumulator
         let start_convert1 = Instant::now();
         let acc1 = reducer.strict_to_acc(&input1).expect("Failed to convert input1 to acc");
         let convert1_time = start_convert1.elapsed();
-        println!("⏱️  First strict-to-acc conversion: {:?}", convert1_time);
+        debug!("⏱️  First strict-to-acc conversion: {:?}", convert1_time);
         
         let start_convert2 = Instant::now();
         let acc2 = reducer.strict_to_acc(&input2).expect("Failed to convert input2 to acc");
         let convert2_time = start_convert2.elapsed();
-        println!("⏱️  Second strict-to-acc conversion: {:?}", convert2_time);
+        debug!("⏱️  Second strict-to-acc conversion: {:?}", convert2_time);
         
-        println!("📊 Pre-folding instance sizes:");
-        println!("   Acc1 - X: {}, W: {}, rs: {}, vs: {}", 
-                 acc1.0.X.len(), acc1.1.W.len(), acc1.0.rs.len(), acc1.0.vs.len());
-        println!("   Acc2 - X: {}, W: {}, rs: {}, vs: {}", 
-                 acc2.0.X.len(), acc2.1.W.len(), acc2.0.rs.len(), acc2.0.vs.len());
+        debug!("Pre-folding instance sizes:");
+        debug!("   Acc1 - X: {}, W: {}, rs: {}, vs: {}", 
+            acc1.0.X.len(), acc1.1.W.len(), acc1.0.rs.len(), acc1.0.vs.len());
+        debug!("   Acc2 - X: {}, W: {}, rs: {}, vs: {}", 
+            acc2.0.X.len(), acc2.1.W.len(), acc2.0.rs.len(), acc2.0.vs.len());
         
-        println!("🔄 Folding accumulator instances...");
+        // Time the folding operation
+        let start_fold = Instant::now();
+        let (folded_acc, proof) = reducer.fold_acc_acc(&[acc1, acc2]).expect("Failed to fold accumulator instances");
+        let fold_time = start_fold.elapsed();
         
-        // Fold the two accumulator instances
-        let acc_children = [acc1, acc2];
+        info!("⏱️  FOLDING TIME: {:?}", fold_time);
+        debug!("Post-folding instance sizes:");
+        debug!("   Folded - X: {}, W: {}, rs: {}, vs: {}", 
+            folded_acc.0.X.len(), folded_acc.1.W.len(), folded_acc.0.rs.len(), folded_acc.0.vs.len());
         
-        let start_fold_time = Instant::now();
+        // Verify the folded instance
+        assert!(reducer.verify_step(&folded_acc, &proof), "Folded instance should verify");
         
-        let (folded_acc, proof) = reducer.fold_acc_acc(&acc_children).expect("Failed to fold accumulator instances");
-        
-        let fold_time = start_fold_time.elapsed();
-        
-        println!("⏱️  ACCUMULATOR FOLDING TIME: {:?}", fold_time);
-        println!("📊 Post-folding results:");
-        println!("   Folded LCCS - X: {}, rs: {}, vs: {}", 
-                 folded_acc.0.X.len(), folded_acc.0.rs.len(), folded_acc.0.vs.len());
-        println!("   Folded witness - W: {}", folded_acc.1.W.len());
-        
-        println!("🔍 Verifying folding result...");
-        
-        // Verify the folding operation
-        let start_verify_time = Instant::now();
-        
-        let verified = reducer.verify_step(&folded_acc, &proof);
-        
-        let verify_time = start_verify_time.elapsed();
-        
-        println!("⏱️  Verification time: {:?}", verify_time);
-        
-        assert!(verified, "Fold verification failed");
-        
-        println!("📈 TIMING SUMMARY:");
-        println!("   • First conversion:  {:?}", convert1_time);
-        println!("   • Second conversion: {:?}", convert2_time);
-        println!("   • Folding operation: {:?}", fold_time);
-        println!("   • Verification:      {:?}", verify_time);
-        println!("   • Total time:        {:?}", convert1_time + convert2_time + fold_time + verify_time);
-        
-        println!("✅ Fold verification succeeded");
+        info!("✅ Accumulator folding test passed");
     }
 }

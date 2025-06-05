@@ -12,35 +12,13 @@ use ark_relations::r1cs::{
 };
 use ark_spartan::polycommitments::{PCSKeys, PolyCommitmentScheme};
 use ark_std::rand::RngCore;
-use std::sync::Once;
+use tracing::{info, debug};
 
 use super::{
     ccs::{CCSInstance, CCSShape, CCSWitness},
     commitment::CommitmentScheme,
     r1cs::{R1CSInstance, R1CSShape, R1CSWitness},
 };
-
-static INIT: Once = Once::new();
-
-/// Initialize global test environment, including tracing
-pub fn init_test_env() {
-    INIT.call_once(|| {
-        // Initialize tracing
-        let subscriber = tracing_subscriber::fmt()
-            .with_target(true)
-            .with_thread_ids(true)
-            .with_thread_names(true)
-            .with_file(true)
-            .with_line_number(true)
-            .with_level(true)
-            .with_ansi(true)
-            .with_max_level(tracing::Level::DEBUG)
-            .finish();
-            
-        tracing::subscriber::set_global_default(subscriber)
-            .expect("Failed to set tracing subscriber");
-    });
-}
 
 /// Circuit with a single public input `y`, which enforces `x**3 + x + 5 == y`.
 struct CubicCircuit {
@@ -161,11 +139,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracing_test::traced_test;
 
+    #[traced_test]
     #[test]
-    fn test_init() {
-        init_test_env();
-        // Verify tracing is working
-        tracing::info!("Test initialization successful");
+    fn test_tracing() {
+        info!("Test tracing is working");
+        assert!(logs_contain("Test tracing is working"));
     }
 }
