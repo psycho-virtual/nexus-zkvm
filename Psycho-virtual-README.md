@@ -9,8 +9,9 @@ cd nova && cargo build
 
 ```rust
 cd nova
-RUST_LOG=debug cargo test ccs -- -nocapture
-RUST_LOG=debug cargo test tree_folding -- -nocapture
+RUST_LOG=debug cargo test ccs -- --nocapture
+RUST_LOG=debug cargo test tree_folding -- --nocapture
+RUST_LOG=debug cargo test parallel_tree -- --nocapture
 ```
 
 You need to run specific tests
