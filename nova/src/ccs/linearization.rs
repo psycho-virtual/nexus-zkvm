@@ -14,6 +14,7 @@ use super::{
     mle::{vec_to_ark_mle, vec_to_mle},
     CCSInstance, CCSShape, CCSWitness, Error, LCCSInstance,
 };
+use crate::folding::hypernova::ml_sumcheck::protocol::prover::ProverMsg;
 use crate::{
     circuits::nova::StepCircuit,
     folding::hypernova::ml_sumcheck::{ListOfProductsOfPolynomials, MLSumcheck},
@@ -25,7 +26,6 @@ use ark_ff::{Field, PrimeField};
 use ark_r1cs_std::{alloc::AllocVar, fields::fp::FpVar};
 use ark_relations::r1cs::{ConstraintSystem, SynthesisError, SynthesisMode};
 use ark_spartan::polycommitments::PolyCommitmentScheme;
-use crate::folding::hypernova::ml_sumcheck::protocol::prover::ProverMsg;
 
 // Tracing target for linearization operations
 const LINEARIZATION_TARGET: &str = "linearization";
@@ -74,6 +74,8 @@ pub struct LCCSLinearization<G: CurveGroup, C: PolyCommitmentScheme<G>> {
     pub beta: Vec<G::ScalarField>,
     /// Computed equality polynomial value e₂ = eq(β, r'ₓ)
     pub e2: G::ScalarField,
+    /// Number of sumcheck rounds (should equal log₂(num_constraints))
+    pub sumcheck_rounds: usize,
 }
 
 /// Sets up linearization parameters by compiling the step circuit shape once
@@ -94,13 +96,14 @@ where
     SC: StepCircuit<G::ScalarField>,
 {
     let _span = tracing::info_span!(target: LINEARIZATION_TARGET, "setup_linearization").entered();
-    
+
     tracing::info!(target: LINEARIZATION_TARGET, "🔧 Starting linearization setup for step circuit");
     tracing::debug!(target: LINEARIZATION_TARGET, "Circuit ARITY: {}", SC::ARITY);
 
     // ---------- 1. once: compile shape & cache matrices ------------------------
     let (shape_cs, dummy_z) = {
-        let _span = tracing::debug_span!(target: LINEARIZATION_TARGET, "constraint_system_setup").entered();
+        let _span =
+            tracing::debug_span!(target: LINEARIZATION_TARGET, "constraint_system_setup").entered();
         tracing::debug!(target: LINEARIZATION_TARGET, "Creating constraint system in Setup mode");
 
         let shape_cs = ConstraintSystem::<G::ScalarField>::new_ref();
@@ -121,26 +124,29 @@ where
 
     // Generate constraints to extract the shape
     {
-        let _span = tracing::debug_span!(target: LINEARIZATION_TARGET, "constraint_generation").entered();
+        let _span =
+            tracing::debug_span!(target: LINEARIZATION_TARGET, "constraint_generation").entered();
         tracing::debug!(target: LINEARIZATION_TARGET, "Generating constraints for shape extraction");
 
-        let _dummy_output = step_circuit.generate_constraints(shape_cs.clone(), &dummy_z.0, &dummy_z.1)?;
-        
+        let _dummy_output =
+            step_circuit.generate_constraints(shape_cs.clone(), &dummy_z.0, &dummy_z.1)?;
+
         shape_cs.finalize();
         tracing::debug!(target: LINEARIZATION_TARGET, "Constraint generation and finalization completed");
     }
 
     // Convert R1CS to CCS shape
     let ccs_shape = {
-        let _span = tracing::debug_span!(target: LINEARIZATION_TARGET, "r1cs_to_ccs_conversion").entered();
+        let _span =
+            tracing::debug_span!(target: LINEARIZATION_TARGET, "r1cs_to_ccs_conversion").entered();
         tracing::debug!(target: LINEARIZATION_TARGET, "Converting R1CS to CCS shape");
 
         let r1cs_shape = crate::r1cs::R1CSShape::from(shape_cs.clone());
         let ccs_shape = CCSShape::from(r1cs_shape);
-        
+
         tracing::debug!(target: LINEARIZATION_TARGET, "CCS shape - matrices: {}, constraints: {}, vars: {}", 
-            ccs_shape.num_matrices, ccs_shape.num_constraints, ccs_shape.num_vars);
-        
+        ccs_shape.num_matrices, ccs_shape.num_constraints, ccs_shape.num_vars);
+
         ccs_shape
     };
 
@@ -176,21 +182,24 @@ where
     SC: StepCircuit<G::ScalarField>,
     RO: CryptographicSponge,
 {
-    let _span = tracing::debug_span!(target: LINEARIZATION_TARGET, "synthesize_and_linearize_step").entered();
-    
+    let _span = tracing::debug_span!(target: LINEARIZATION_TARGET, "synthesize_and_linearize_step")
+        .entered();
+
     tracing::debug!(target: LINEARIZATION_TARGET, "🔄 Starting step circuit synthesis and linearization");
     tracing::debug!(target: LINEARIZATION_TARGET, "Input step index: {}, state vector length: {}", 
         input.i, input.z_i.len());
 
     // Step 1: Synthesize witness using precomputed shape
     let (ccs_instance, witness) = {
-        let _span = tracing::debug_span!(target: LINEARIZATION_TARGET, "witness_synthesis").entered();
+        let _span =
+            tracing::debug_span!(target: LINEARIZATION_TARGET, "witness_synthesis").entered();
         synthesize_step_circuit_with_params(params, input, ck)?
     };
 
     // Step 2: Run the linearization algorithm
     let linearization = {
-        let _span = tracing::debug_span!(target: LINEARIZATION_TARGET, "ccs_linearization").entered();
+        let _span =
+            tracing::debug_span!(target: LINEARIZATION_TARGET, "ccs_linearization").entered();
         linearize_ccs(
             &params.ccs_shape,
             &ccs_instance,
@@ -224,15 +233,19 @@ where
     C: PolyCommitmentScheme<G>,
     SC: StepCircuit<G::ScalarField>,
 {
-    let _span = tracing::debug_span!(target: LINEARIZATION_TARGET, "synthesize_step_circuit_with_params").entered();
-    
+    let _span =
+        tracing::debug_span!(target: LINEARIZATION_TARGET, "synthesize_step_circuit_with_params")
+            .entered();
+
     tracing::debug!(target: LINEARIZATION_TARGET, "🔧 Synthesizing step circuit witness");
     tracing::debug!(target: LINEARIZATION_TARGET, "Using precomputed CCS shape with {} matrices, {} constraints", 
         params.ccs_shape.num_matrices, params.ccs_shape.num_constraints);
 
     // ---------- 2. every proof: build the witness only -------------------------
     let (cs, z_vars) = {
-        let _span = tracing::debug_span!(target: LINEARIZATION_TARGET, "constraint_system_creation").entered();
+        let _span =
+            tracing::debug_span!(target: LINEARIZATION_TARGET, "constraint_system_creation")
+                .entered();
         let cs = ConstraintSystem::new_ref();
         cs.set_mode(SynthesisMode::Prove { construct_matrices: false }); // no A/B/C reconstruction
 
@@ -253,7 +266,8 @@ where
 
     // Generate constraints for the step circuit (witness only)
     {
-        let _span = tracing::debug_span!(target: LINEARIZATION_TARGET, "constraint_generation").entered();
+        let _span =
+            tracing::debug_span!(target: LINEARIZATION_TARGET, "constraint_generation").entered();
         tracing::debug!(target: LINEARIZATION_TARGET, "Generating constraints for witness synthesis");
 
         let _z_next = params
@@ -267,8 +281,10 @@ where
 
     // Extract the constraint system data and create witness/instance
     let (witness, ccs_instance) = {
-        let _span = tracing::debug_span!(target: LINEARIZATION_TARGET, "witness_and_instance_creation").entered();
-        
+        let _span =
+            tracing::debug_span!(target: LINEARIZATION_TARGET, "witness_and_instance_creation")
+                .entered();
+
         let cs_borrow = cs.borrow().unwrap();
         let witness_assignment = cs_borrow.witness_assignment.clone();
         let public_assignment = cs_borrow.instance_assignment.clone();
@@ -324,7 +340,7 @@ where
     RO: CryptographicSponge,
 {
     let _span = tracing::info_span!(target: LINEARIZATION_TARGET, "linearize_ccs").entered();
-    
+
     tracing::info!(target: LINEARIZATION_TARGET, "🔄 Starting CCS to LCCS linearization");
     tracing::debug!(target: LINEARIZATION_TARGET, "CCS instance - X length: {}, W length: {}", 
         instance.X.len(), witness.W.len());
@@ -333,61 +349,67 @@ where
 
     // Step 1: Verify the CCS instance is satisfied (optional check)
     {
-        let _span = tracing::debug_span!(target: LINEARIZATION_TARGET, "ccs_satisfaction_check").entered();
+        let _span =
+            tracing::debug_span!(target: LINEARIZATION_TARGET, "ccs_satisfaction_check").entered();
         shape.is_satisfied(instance, witness, ck)?;
         tracing::debug!(target: LINEARIZATION_TARGET, "CCS satisfaction check completed");
     }
 
     // Step 2: Sample challenges from random oracle
-    let (gamma, beta) = {
-        let _span = tracing::debug_span!(target: LINEARIZATION_TARGET, "challenge_sampling").entered();
+    let (gamma, beta, sumcheck_rounds) = {
+        let _span =
+            tracing::debug_span!(target: LINEARIZATION_TARGET, "challenge_sampling").entered();
         tracing::debug!(target: LINEARIZATION_TARGET, "Sampling challenges from random oracle");
 
         // Sample γ ← F
         let gamma: G::ScalarField = random_oracle.squeeze_field_elements(1)[0];
-        // Sample β ← F^s
-        let s = safe_loglike!(shape.num_constraints) as usize;
-        let beta = random_oracle.squeeze_field_elements(s);
-        
-        tracing::debug!(target: LINEARIZATION_TARGET, "Challenge sampling completed (γ, β with {} elements)", s);
-        
-        (gamma, beta)
+        // Sample β ← F^s where s is the number of sumcheck rounds
+        let sumcheck_rounds = safe_loglike!(shape.num_constraints) as usize;
+        let beta = random_oracle.squeeze_field_elements(sumcheck_rounds);
+
+        tracing::debug!(target: LINEARIZATION_TARGET, "Challenge sampling completed (γ, β with {} elements, {} sumcheck rounds)", 
+            sumcheck_rounds, sumcheck_rounds);
+
+        (gamma, beta, sumcheck_rounds)
     };
 
     // Step 3: Construct the g(x) CCS folding polynomial for sum-check
     let (polynomial, z) = {
-        let _span = tracing::debug_span!(target: LINEARIZATION_TARGET, "polynomial_construction").entered();
+        let _span =
+            tracing::debug_span!(target: LINEARIZATION_TARGET, "polynomial_construction").entered();
         tracing::debug!(target: LINEARIZATION_TARGET, "Constructing CCS polynomial for sum-check");
 
         let z = [instance.X.as_slice(), witness.W.as_slice()].concat();
         let polynomial = construct_css_polynomial(shape, &z, &beta, gamma)?;
-        
+
         tracing::debug!(target: LINEARIZATION_TARGET, "Polynomial construction completed (z length: {})", z.len());
-        
+
         (polynomial, z)
     };
 
     // Step 4: Run the sum-check protocol
     let (sumcheck_proof, r_x) = {
-        let _span = tracing::debug_span!(target: LINEARIZATION_TARGET, "sumcheck_protocol").entered();
+        let _span =
+            tracing::debug_span!(target: LINEARIZATION_TARGET, "sumcheck_protocol").entered();
         tracing::debug!(target: LINEARIZATION_TARGET, "Running ML sum-check protocol");
 
         // The claimed sum should be 0 for a satisfied CCS instance
         let (sumcheck_proof, prover_state) =
             MLSumcheck::prove_as_subprotocol(random_oracle, &polynomial);
-        
+
         // Extract the random evaluation point from sum-check
         let r_x = prover_state.randomness;
-        
+
         tracing::debug!(target: LINEARIZATION_TARGET, "Sum-check protocol completed (proof rounds: {}, evaluation point length: {})", 
             sumcheck_proof.len(), r_x.len());
-        
+
         (sumcheck_proof, r_x)
     };
 
     // Step 5: Compute the theta values
     let vs = {
-        let _span = tracing::debug_span!(target: LINEARIZATION_TARGET, "theta_computation").entered();
+        let _span =
+            tracing::debug_span!(target: LINEARIZATION_TARGET, "theta_computation").entered();
         tracing::debug!(target: LINEARIZATION_TARGET, "Computing theta values (matrix evaluations)");
 
         // θ_j = Σ_{y∈{0,1}^s'} M_j(r'_x, y) · z(y)
@@ -397,15 +419,16 @@ where
                 vec_to_mle(M_j_z.as_slice()).evaluate::<G>(r_x.as_slice())
             })
             .collect();
-        
+
         tracing::debug!(target: LINEARIZATION_TARGET, "Theta computation completed (computed {} theta values)", vs.len());
-        
+
         vs
     };
 
     // Step 6: Build the LCCS instance
     let lccs_instance = {
-        let _span = tracing::debug_span!(target: LINEARIZATION_TARGET, "lccs_instance_creation").entered();
+        let _span =
+            tracing::debug_span!(target: LINEARIZATION_TARGET, "lccs_instance_creation").entered();
         tracing::debug!(target: LINEARIZATION_TARGET, "Building LCCS instance");
 
         // The commitment is the same as the original CCS instance
@@ -418,22 +441,25 @@ where
         }
 
         let lccs_instance = LCCSInstance::new(shape, &commitment_W, &X, &r_x, &vs)?;
-        
+
         tracing::debug!(target: LINEARIZATION_TARGET, "LCCS instance creation completed");
-        
+
         lccs_instance
     };
 
     // Step 7: Verify the linearized instance is satisfied
     {
-        let _span = tracing::debug_span!(target: LINEARIZATION_TARGET, "lccs_satisfaction_check").entered();
+        let _span =
+            tracing::debug_span!(target: LINEARIZATION_TARGET, "lccs_satisfaction_check").entered();
         shape.is_satisfied_linearized(&lccs_instance, witness, ck)?;
         tracing::debug!(target: LINEARIZATION_TARGET, "LCCS satisfaction check completed");
     }
 
     // Step 7: Compute e₂ = eq(β, r'ₓ) for verification purposes
     let e2 = {
-        let _span = tracing::debug_span!(target: LINEARIZATION_TARGET, "equality_polynomial_computation").entered();
+        let _span =
+            tracing::debug_span!(target: LINEARIZATION_TARGET, "equality_polynomial_computation")
+                .entered();
         compute_equality_polynomial::<G>(&beta, &r_x)?
     };
 
@@ -446,6 +472,7 @@ where
         gamma,
         beta,
         e2,
+        sumcheck_rounds,
     })
 }
 
@@ -530,85 +557,104 @@ where
     RO: CryptographicSponge,
 {
     let _span = tracing::info_span!(target: LINEARIZATION_TARGET, "verify_linearization").entered();
-    
+
     tracing::info!(target: LINEARIZATION_TARGET, "🔍 Starting linearization verification");
-    tracing::debug!(target: LINEARIZATION_TARGET, "Verifying linearization with {} sumcheck proof rounds", 
-        linearization.sumcheck_proof.len());
+    tracing::debug!(target: LINEARIZATION_TARGET, "Verifying linearization with {} sumcheck proof rounds (expected: {})", 
+        linearization.sumcheck_proof.len(), linearization.sumcheck_rounds);
+
+    // Verify the sumcheck proof has the expected number of rounds
+    if linearization.sumcheck_proof.len() != linearization.sumcheck_rounds {
+        tracing::error!(target: LINEARIZATION_TARGET, "Sumcheck proof round count mismatch: expected {}, got {}", 
+            linearization.sumcheck_rounds, linearization.sumcheck_proof.len());
+        return Err(Error::NotSatisfied);
+    }
 
     // Step 1: Regenerate the same challenges and verify they match stored values
     let (gamma, beta) = {
         let _span = tracing::debug_span!(target: LINEARIZATION_TARGET, "challenge_regeneration_and_verification").entered();
-        
+
         // Sample γ ← F (same as in proving)
         let regenerated_gamma: G::ScalarField = random_oracle.squeeze_field_elements(1)[0];
         // Sample β ← F^s (same as in proving)
-        let s = safe_loglike!(shape.num_constraints) as usize;
-        let regenerated_beta = random_oracle.squeeze_field_elements(s);
-        
+        let expected_rounds = safe_loglike!(shape.num_constraints) as usize;
+        let regenerated_beta = random_oracle.squeeze_field_elements(expected_rounds);
+
+        // Verify the stored sumcheck rounds matches the expected value
+        if linearization.sumcheck_rounds != expected_rounds {
+            tracing::error!(target: LINEARIZATION_TARGET, "Sumcheck rounds mismatch: expected {}, stored {}", 
+                expected_rounds, linearization.sumcheck_rounds);
+            return Err(Error::NotSatisfied);
+        }
+
         // Verify the regenerated challenges match the stored ones
         if regenerated_gamma != linearization.gamma {
             tracing::error!(target: LINEARIZATION_TARGET, "Gamma challenge mismatch");
             return Err(Error::NotSatisfied);
         }
-        
+
         if regenerated_beta != linearization.beta {
             tracing::error!(target: LINEARIZATION_TARGET, "Beta challenge mismatch");
             return Err(Error::NotSatisfied);
         }
-        
-        tracing::debug!(target: LINEARIZATION_TARGET, "Challenge verification passed (γ, β with {} elements)", s);
-        
+
+        tracing::debug!(target: LINEARIZATION_TARGET, "Challenge verification passed (γ, β with {} elements, {} rounds)", 
+            expected_rounds, linearization.sumcheck_rounds);
+
         (regenerated_gamma, regenerated_beta)
     };
 
     // Step 2: Reconstruct the polynomial and verify sumcheck
     let (polynomial_info, r_x) = {
-        let _span = tracing::debug_span!(target: LINEARIZATION_TARGET, "sumcheck_verification").entered();
-        
+        let _span =
+            tracing::debug_span!(target: LINEARIZATION_TARGET, "sumcheck_verification").entered();
+
         // Reconstruct the witness vector z = (X || W)
         let z = [instance.X.as_slice(), witness.W.as_slice()].concat();
-        
+
         // Reconstruct the same polynomial as in proving
         let polynomial = construct_css_polynomial(shape, &z, &beta, gamma)?;
         let polynomial_info = polynomial.info();
-        
+
         // The claimed sum should be 0 for a satisfied CCS instance
         let claimed_sum = G::ScalarField::ZERO;
-        
+
         // Verify the sumcheck proof directly
         let subclaim = MLSumcheck::verify_as_subprotocol(
             random_oracle,
             &polynomial_info,
             claimed_sum,
             &linearization.sumcheck_proof,
-        ).map_err(|_| Error::NotSatisfied)?;
-        
+        )
+        .map_err(|_| Error::NotSatisfied)?;
+
         // Extract the evaluation point from the subclaim
         let r_x = subclaim.point;
-        
+
         // Verify the evaluation point matches what's stored in the LCCS instance
         if r_x != linearization.lccs_instance.rs {
             tracing::error!(target: LINEARIZATION_TARGET, "Evaluation point mismatch");
             return Err(Error::NotSatisfied);
         }
-        
+
         // Verify the final evaluation is indeed 0 (as expected for satisfied CCS)
         if subclaim.expected_evaluation != G::ScalarField::ZERO {
             tracing::error!(target: LINEARIZATION_TARGET, "Expected evaluation is not zero");
             return Err(Error::NotSatisfied);
         }
-        
+
         tracing::debug!(target: LINEARIZATION_TARGET, "Sumcheck verification passed");
-        
+
         (polynomial_info, r_x)
     };
 
     // Step 3: Compute and verify e₂ = eq(β, r'ₓ) matches stored value
     let e2 = {
-        let _span = tracing::debug_span!(target: LINEARIZATION_TARGET, "equality_polynomial_verification").entered();
-        
+        let _span =
+            tracing::debug_span!(target: LINEARIZATION_TARGET, "equality_polynomial_verification")
+                .entered();
+
         let recomputed_e2 = compute_equality_polynomial::<G>(&beta, &r_x)?;
-        
+
         // Verify the recomputed e2 matches the stored value
         if recomputed_e2 != linearization.e2 {
             tracing::error!(target: LINEARIZATION_TARGET, "e₂ value mismatch");
@@ -616,18 +662,20 @@ where
             tracing::debug!(target: LINEARIZATION_TARGET, "Stored e₂: {:?}", linearization.e2);
             return Err(Error::NotSatisfied);
         }
-        
+
         tracing::debug!(target: LINEARIZATION_TARGET, "e₂ verification passed: {:?}", recomputed_e2);
-        
+
         recomputed_e2
     };
 
     // Step 4: Recompute and verify v_j := ∑_{y ∈ {0,1}^{s'}} M_{f_j}(r_x, y) · z_e(y)
     {
-        let _span = tracing::debug_span!(target: LINEARIZATION_TARGET, "matrix_vector_verification").entered();
-        
+        let _span =
+            tracing::debug_span!(target: LINEARIZATION_TARGET, "matrix_vector_verification")
+                .entered();
+
         let z = [instance.X.as_slice(), witness.W.as_slice()].concat();
-        
+
         // Recompute the vs values (matrix evaluations at the sumcheck point)
         let computed_vs: Vec<G::ScalarField> = (0..shape.num_matrices)
             .map(|j| {
@@ -635,7 +683,7 @@ where
                 vec_to_mle(M_j_z.as_slice()).evaluate::<G>(r_x.as_slice())
             })
             .collect();
-        
+
         // Verify they match what's stored in the LCCS instance
         if computed_vs != linearization.lccs_instance.vs {
             tracing::error!(target: LINEARIZATION_TARGET, "Matrix evaluation mismatch");
@@ -643,25 +691,27 @@ where
             tracing::debug!(target: LINEARIZATION_TARGET, "Stored vs: {:?}", linearization.lccs_instance.vs);
             return Err(Error::NotSatisfied);
         }
-        
+
         tracing::debug!(target: LINEARIZATION_TARGET, "Matrix-vector computations verified ({} values)", computed_vs.len());
     };
 
     // Step 5: Verify the main verification equation consistency
     {
-        let _span = tracing::debug_span!(target: LINEARIZATION_TARGET, "main_equation_verification").entered();
-        
+        let _span =
+            tracing::debug_span!(target: LINEARIZATION_TARGET, "main_equation_verification")
+                .entered();
+
         // Compute the left side: ∑_{j=1}^{num_matrices} γʲ · vs[j-1]
         let gamma_powers: Vec<G::ScalarField> = (1..=shape.num_matrices)
             .map(|j| gamma.pow([j as u64]))
             .collect();
-        
+
         let left_side: G::ScalarField = gamma_powers
             .iter()
             .zip(linearization.lccs_instance.vs.iter())
             .map(|(gamma_j, v_j)| *gamma_j * v_j)
             .sum();
-        
+
         // For the verification equation c = ∑_{k∈[ν]} γ · e₂ · ∑_{i=1}^q cᵢ ∏_{j∈Sᵢ} θⱼ,ₖ,
         // we compute the right side using the CCS multiset structure
         let right_side: G::ScalarField = (0..shape.num_multisets)
@@ -677,21 +727,21 @@ where
             .sum::<G::ScalarField>()
             * gamma // multiply by γ
             * e2; // multiply by e₂
-        
+
         // For a correctly linearized CCS instance, these should be equal when the
         // polynomial evaluates to 0 over the boolean hypercube
         // However, the exact relationship depends on the polynomial construction
         // For now, we log the values for debugging
         tracing::debug!(target: LINEARIZATION_TARGET, "Left side (γ·vs sum): {}", left_side);
         tracing::debug!(target: LINEARIZATION_TARGET, "Right side (multiset sum): {}", right_side);
-        
+
         // The main verification is that the sumcheck passed, which already confirms
         // the polynomial relationship is correct
         tracing::debug!(target: LINEARIZATION_TARGET, "Main equation structure verified");
     };
 
     tracing::info!(target: LINEARIZATION_TARGET, "✅ Linearization verification completed successfully");
-    
+
     Ok(())
 }
 
@@ -706,7 +756,7 @@ fn compute_equality_polynomial<G: CurveGroup>(
     if a.len() != b.len() {
         return Err(Error::NotSatisfied);
     }
-    
+
     let result: G::ScalarField = a
         .iter()
         .zip(b.iter())
@@ -718,7 +768,7 @@ fn compute_equality_polynomial<G: CurveGroup>(
             ai_bi + ai_bi - ai - bi + G::ScalarField::ONE
         })
         .product();
-    
+
     Ok(result)
 }
 
@@ -1002,7 +1052,8 @@ mod tests {
         };
 
         // Produce linearization (proving side)
-        let result = synthesize_and_linearize_step::<G, Z, _, _>(&params, &input, &ck, &mut prover_ro)?;
+        let result =
+            synthesize_and_linearize_step::<G, Z, _, _>(&params, &input, &ck, &mut prover_ro)?;
 
         // Verification random oracle (fresh, same initial state)
         let mut verifier_ro = PoseidonSponge::new(&config);
