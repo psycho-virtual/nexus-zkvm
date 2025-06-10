@@ -299,7 +299,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start_setup_time = Instant::now();
     
     tracing::info!(target: PARALLEL_TREE_TARGET, "{} Setting up fast test circuit (should take seconds)...", thread_id_short());
-    let linearization_params = setup_linearization(FastTestCircuit::<CF> { _phantom: PhantomData })?;
+    let cs = ark_relations::r1cs::ConstraintSystem::new_ref();
+    let linearization_params = setup_linearization(cs, FastTestCircuit::<CF> { _phantom: PhantomData })?;
     
     let setup_time = start_setup_time.elapsed();
     end_timer!(setup_timer);
