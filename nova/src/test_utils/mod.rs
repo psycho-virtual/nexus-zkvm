@@ -12,7 +12,7 @@ use ark_relations::r1cs::{
 };
 use ark_spartan::polycommitments::{PCSKeys, PolyCommitmentScheme};
 use ark_std::rand::RngCore;
-use tracing::{info, debug};
+use tracing::info;
 
 use super::{
     ccs::{CCSInstance, CCSShape, CCSWitness},

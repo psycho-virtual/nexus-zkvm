@@ -24,7 +24,7 @@ use ark_crypto_primitives::sponge::{Absorb, CryptographicSponge};
 use ark_ec::{AdditiveGroup, CurveGroup};
 use ark_ff::{Field, PrimeField};
 use ark_r1cs_std::{alloc::AllocVar, fields::fp::FpVar};
-use ark_relations::r1cs::{ConstraintSystem, SynthesisError, SynthesisMode};
+use ark_relations::r1cs::{ConstraintSystem, ConstraintSystemRef, SynthesisError, SynthesisMode};
 use ark_spartan::polycommitments::PolyCommitmentScheme;
 
 // Tracing target for linearization operations
@@ -85,11 +85,15 @@ pub struct LCCSLinearization<G: CurveGroup, C: PolyCommitmentScheme<G>> {
 /// for multiple linearizations without recomputing the constraint structure.
 ///
 /// # Arguments
+/// * `cs` - The constraint system to use for shape compilation
 /// * `step_circuit` - The step circuit to compile
 ///
 /// # Returns
 /// * `LinearizationParams` containing the precomputed shape and circuit
-pub fn setup_linearization<G, SC>(step_circuit: SC) -> Result<LinearizationParams<G, SC>, Error>
+pub fn setup_linearization<G, SC>(
+    cs: ConstraintSystemRef<G::ScalarField>,
+    step_circuit: SC,
+) -> Result<LinearizationParams<G, SC>, Error>
 where
     G: CurveGroup,
     G::ScalarField: PrimeField,
@@ -101,25 +105,24 @@ where
     tracing::debug!(target: LINEARIZATION_TARGET, "Circuit ARITY: {}", SC::ARITY);
 
     // ---------- 1. once: compile shape & cache matrices ------------------------
-    let (shape_cs, dummy_z) = {
+    let dummy_z = {
         let _span =
             tracing::debug_span!(target: LINEARIZATION_TARGET, "constraint_system_setup").entered();
-        tracing::debug!(target: LINEARIZATION_TARGET, "Creating constraint system in Setup mode");
+        tracing::debug!(target: LINEARIZATION_TARGET, "Using provided constraint system in Setup mode");
 
-        let shape_cs = ConstraintSystem::<G::ScalarField>::new_ref();
-        shape_cs.set_mode(SynthesisMode::Setup);
+        cs.set_mode(SynthesisMode::Setup);
 
         // Create blank circuit for shape compilation
         // We need to allocate dummy variables with the right structure
-        let dummy_i = FpVar::new_witness(shape_cs.clone(), || Ok(G::ScalarField::ZERO))?;
+        let dummy_i = FpVar::new_witness(cs.clone(), || Ok(G::ScalarField::ZERO))?;
         let dummy_z: Result<Vec<_>, _> = (0..SC::ARITY)
-            .map(|_| FpVar::new_witness(shape_cs.clone(), || Ok(G::ScalarField::ZERO)))
+            .map(|_| FpVar::new_witness(cs.clone(), || Ok(G::ScalarField::ZERO)))
             .collect();
         let dummy_z = dummy_z?;
 
         tracing::debug!(target: LINEARIZATION_TARGET, "Dummy variable allocation completed");
 
-        (shape_cs, (dummy_i, dummy_z))
+        (dummy_i, dummy_z)
     };
 
     // Generate constraints to extract the shape
@@ -128,10 +131,8 @@ where
             tracing::debug_span!(target: LINEARIZATION_TARGET, "constraint_generation").entered();
         tracing::debug!(target: LINEARIZATION_TARGET, "Generating constraints for shape extraction");
 
-        let _dummy_output =
-            step_circuit.generate_constraints(shape_cs.clone(), &dummy_z.0, &dummy_z.1)?;
+        let _dummy_output = step_circuit.generate_constraints(cs.clone(), &dummy_z.0, &dummy_z.1)?;
 
-        shape_cs.finalize();
         tracing::debug!(target: LINEARIZATION_TARGET, "Constraint generation and finalization completed");
     }
 
@@ -141,7 +142,7 @@ where
             tracing::debug_span!(target: LINEARIZATION_TARGET, "r1cs_to_ccs_conversion").entered();
         tracing::debug!(target: LINEARIZATION_TARGET, "Converting R1CS to CCS shape");
 
-        let r1cs_shape = crate::r1cs::R1CSShape::from(shape_cs.clone());
+        let r1cs_shape = crate::r1cs::R1CSShape::from(cs.clone());
         let ccs_shape = CCSShape::from(r1cs_shape);
 
         tracing::debug!(target: LINEARIZATION_TARGET, "CCS shape - matrices: {}, constraints: {}, vars: {}", 
@@ -162,6 +163,7 @@ where
 /// produce an LCCS instance.
 ///
 /// # Arguments
+/// * `cs` - The constraint system to use for witness synthesis
 /// * `params` - Precomputed linearization parameters
 /// * `input` - Input to the step circuit
 /// * `ck` - Polynomial commitment key
@@ -170,6 +172,7 @@ where
 /// # Returns
 /// * `LinearizationResult` containing the CCS shape, instance, and linearization
 pub fn synthesize_and_linearize_step<G, C, SC, RO>(
+    cs: ConstraintSystemRef<G::ScalarField>,
     params: &LinearizationParams<G, SC>,
     input: &StepFunctionInput<G::ScalarField>,
     ck: &C::PolyCommitmentKey,
@@ -193,7 +196,7 @@ where
     let (ccs_instance, witness) = {
         let _span =
             tracing::debug_span!(target: LINEARIZATION_TARGET, "witness_synthesis").entered();
-        synthesize_step_circuit_with_params(params, input, ck)?
+        synthesize_step_circuit_with_params(cs, params, input, ck)?
     };
 
     // Step 2: Run the linearization algorithm
@@ -223,6 +226,7 @@ where
 /// This function efficiently generates the witness by reusing precomputed constraint
 /// matrices and only computing the witness assignments.
 pub fn synthesize_step_circuit_with_params<G, C, SC>(
+    cs: ConstraintSystemRef<G::ScalarField>,
     params: &LinearizationParams<G, SC>,
     input: &StepFunctionInput<G::ScalarField>,
     ck: &C::PolyCommitmentKey,
@@ -242,11 +246,10 @@ where
         params.ccs_shape.num_matrices, params.ccs_shape.num_constraints);
 
     // ---------- 2. every proof: build the witness only -------------------------
-    let (cs, z_vars) = {
+    let z_vars = {
         let _span =
             tracing::debug_span!(target: LINEARIZATION_TARGET, "constraint_system_creation")
                 .entered();
-        let cs = ConstraintSystem::new_ref();
         cs.set_mode(SynthesisMode::Prove { construct_matrices: false }); // no A/B/C reconstruction
 
         // Allocate step index and state variables with actual values
@@ -261,7 +264,7 @@ where
         tracing::debug!(target: LINEARIZATION_TARGET, "Variable allocation completed (allocated {} variables)", 
             1 + input.z_i.len());
 
-        (cs, (i_var, z_vars))
+        (i_var, z_vars)
     };
 
     // Generate constraints for the step circuit (witness only)
@@ -854,7 +857,8 @@ mod tests {
         };
 
         // Setup linearization parameters once
-        let params = setup_linearization::<G, _>(CubicCircuit::<Fr> { _phantom: PhantomData })?;
+        let cs = ConstraintSystem::new_ref();
+        let params = setup_linearization::<G, _>(cs, CubicCircuit::<Fr> { _phantom: PhantomData })?;
 
         // Setup random oracle
         let config = poseidon_config::<Fr>();
@@ -867,8 +871,9 @@ mod tests {
         let input = StepFunctionInput { i: step_index, z_i: vec![current_state] };
 
         // Synthesize and linearize using params
+        let cs = ConstraintSystem::new_ref();
         let result =
-            synthesize_and_linearize_step::<G, Z, _, _>(&params, &input, &ck, &mut random_oracle)?;
+            synthesize_and_linearize_step::<G, Z, _, _>(cs, &params, &input, &ck, &mut random_oracle)?;
 
         tracing::debug!(target: TEST_TARGET, "✓ Linearization completed successfully");
 
@@ -921,7 +926,8 @@ mod tests {
         };
 
         // Setup linearization parameters once and reuse
-        let params = setup_linearization::<G, _>(CubicCircuit::<Fr> { _phantom: PhantomData })?;
+        let cs = ConstraintSystem::new_ref();
+        let params = setup_linearization::<G, _>(cs, CubicCircuit::<Fr> { _phantom: PhantomData })?;
 
         // Test with multiple different inputs to ensure consistency
         let test_cases = vec![
@@ -940,7 +946,9 @@ mod tests {
                 z_i: vec![input_val],
             };
 
+            let cs = ConstraintSystem::new_ref();
             let result = synthesize_and_linearize_step::<G, Z, _, _>(
+                cs,
                 &params,
                 &input,
                 &ck,
@@ -981,7 +989,8 @@ mod tests {
         };
 
         // Setup linearization parameters once
-        let params = setup_linearization::<G, _>(CubicCircuit::<Fr> { _phantom: PhantomData })?;
+        let cs = ConstraintSystem::new_ref();
+        let params = setup_linearization::<G, _>(cs, CubicCircuit::<Fr> { _phantom: PhantomData })?;
 
         let config = poseidon_config::<Fr>();
         let mut random_oracle = PoseidonSponge::new(&config);
@@ -991,8 +1000,9 @@ mod tests {
             z_i: vec![Fr::from(6u64)],
         };
 
+        let cs = ConstraintSystem::new_ref();
         let result =
-            synthesize_and_linearize_step::<G, Z, _, _>(&params, &input, &ck, &mut random_oracle)?;
+            synthesize_and_linearize_step::<G, Z, _, _>(cs, &params, &input, &ck, &mut random_oracle)?;
 
         // Test key properties of the linearization
 
@@ -1038,7 +1048,8 @@ mod tests {
         };
 
         // Pre-compute linearization parameters
-        let params = setup_linearization::<G, _>(CubicCircuit::<Fr> { _phantom: PhantomData })?;
+        let cs = ConstraintSystem::new_ref();
+        let params = setup_linearization::<G, _>(cs, CubicCircuit::<Fr> { _phantom: PhantomData })?;
 
         // Proving random oracle
         let config = poseidon_config::<Fr>();
@@ -1052,8 +1063,9 @@ mod tests {
         };
 
         // Produce linearization (proving side)
+        let cs = ConstraintSystem::new_ref();
         let result =
-            synthesize_and_linearize_step::<G, Z, _, _>(&params, &input, &ck, &mut prover_ro)?;
+            synthesize_and_linearize_step::<G, Z, _, _>(cs, &params, &input, &ck, &mut prover_ro)?;
 
         // Verification random oracle (fresh, same initial state)
         let mut verifier_ro = PoseidonSponge::new(&config);

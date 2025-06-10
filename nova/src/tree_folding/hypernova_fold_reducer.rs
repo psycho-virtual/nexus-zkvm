@@ -140,7 +140,8 @@ where
 
     fn strict_to_acc(&self, strict: &Self::StrictInst) -> Result<Self::AccInst, Self::Error> {
         // Synthesize step circuit witness using precomputed parameters
-        match synthesize_step_circuit_with_params::<G, C, _>(&self.params, strict, self.ck) {
+        let cs = ark_relations::r1cs::ConstraintSystem::new_ref();
+        match synthesize_step_circuit_with_params::<G, C, _>(cs, &self.params, strict, self.ck) {
             Ok((ccs_instance, witness)) => {
                 // Convert CCS to LCCS by committing to the witness
                 let commitment_W = witness.commit::<C>(self.ck);
@@ -197,7 +198,9 @@ where
 
         let mut random_oracle = self.new_random_oracle();
 
+        let cs = ark_relations::r1cs::ConstraintSystem::new_ref();
         match synthesize_and_linearize_step::<G, C, _, _>(
+            cs,
             &self.params,
             &dummy_input,
             self.ck,
@@ -314,8 +317,9 @@ mod tests {
         let circuit = CubicCircuit::<CF> { _phantom: PhantomData };
 
         // Create a HypernovaFoldReducer to ensure types compile correctly
+        let cs = ark_relations::r1cs::ConstraintSystem::new_ref();
         let _reducer = HypernovaFoldReducer::<G1, Z, _, RO>::new(
-            setup_linearization(circuit).unwrap(),
+            setup_linearization(cs, circuit).unwrap(),
             &ck,
             &ro_config,
         );
@@ -332,8 +336,9 @@ mod tests {
         let circuit = CubicCircuit::<CF> { _phantom: PhantomData };
 
         // Create fold reducer
+        let cs = ark_relations::r1cs::ConstraintSystem::new_ref();
         let reducer = HypernovaFoldReducer::<G1, Z, _, RO>::new(
-            setup_linearization(circuit).unwrap(),
+            setup_linearization(cs, circuit).unwrap(),
             &ck,
             &ro_config,
         );
@@ -380,8 +385,9 @@ mod tests {
         let circuit = CubicCircuit::<CF> { _phantom: PhantomData };
 
         // Create fold reducer
+        let cs = ark_relations::r1cs::ConstraintSystem::new_ref();
         let reducer = HypernovaFoldReducer::<G1, Z, _, RO>::new(
-            setup_linearization(circuit).unwrap(),
+            setup_linearization(cs, circuit).unwrap(),
             &ck,
             &ro_config,
         );
