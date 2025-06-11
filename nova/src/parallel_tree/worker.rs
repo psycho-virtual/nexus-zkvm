@@ -500,7 +500,7 @@ mod tests {
         fmt::format::FmtSpan, layer::SubscriberExt, EnvFilter,
     };
 
-    const TEST_TARGET: &str = "nexus-nova::parallel_tree::worker::tests";
+    const TEST_TARGET: &str = "nexus-nova";
 
     fn setup_test_tracing() {
         static INIT: Once = Once::new();
@@ -511,7 +511,6 @@ mod tests {
                     // Fallback to our specific targets if RUST_LOG is not set
                     EnvFilter::new("debug")
                         .add_directive(format!("{}=trace", TEST_TARGET).parse().unwrap())
-                        .add_directive(format!("{}=trace", WORKER_TARGET).parse().unwrap())
                 });
 
             let subscriber = tracing_subscriber::registry()
