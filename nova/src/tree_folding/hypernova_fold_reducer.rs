@@ -13,6 +13,9 @@ use ark_ff::{PrimeField, ToConstraintField, Zero};
 use std::fmt::Debug;
 use tracing::instrument;
 
+/// Tracing target for HypernovaFoldReducer operations
+const HYPERNOVA_FOLD_REDUCER: &str = "nexus_nova::tree_folding::hypernova_fold_reducer";
+
 /// Error type for HypernovaFoldReducer operations
 #[derive(Debug)]
 pub enum HypernovaFoldError {
@@ -185,6 +188,7 @@ mod tests {
     use ark_r1cs_std::fields::{fp::FpVar, FieldVar};
     use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
     use ark_std::{marker::PhantomData, test_rng};
+    use hex;
     use tracing_subscriber::{
         filter, fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt,
     };
@@ -197,19 +201,16 @@ mod tests {
     type ROConfig = <RO as CryptographicSponge>::Config;
     type PCKey = <Z as PolyCommitmentScheme<G1>>::PolyCommitmentKey;
 
-    const TEST_TARGET: &str = "hypernova_fold_reducer";
+    const TEST_TARGET: &str = "nexus_nova";
+
+    // SRS degree constants for different test scenarios
+    const SMALL_SRS_DEGREE: usize = 10; // 2^10 = 1,024 coefficients (for simple circuits like cubic)
+    const LARGE_SRS_DEGREE: usize = 17; // 2^17 = 131,072 coefficients (for SHA-256 circuit)
 
     // Helper function to set up tracing for tests
     fn setup_test_tracing() -> tracing::subscriber::DefaultGuard {
         let filter = filter::Targets::new()
-            .with_target(TEST_TARGET, tracing::Level::DEBUG)
-            .with_target(
-                "nexus_nova::tree_folding::hypernova_fold_reducer::tests",
-                tracing::Level::DEBUG,
-            )
-            .with_target("nexus_nova::tree_folding", tracing::Level::DEBUG)
-            .with_target("tree_folding", tracing::Level::DEBUG)
-            .with_target("hypernova_fold_reducer", tracing::Level::DEBUG);
+            .with_target(TEST_TARGET, tracing::Level::DEBUG);
 
         tracing_subscriber::registry()
             .with(
@@ -248,33 +249,33 @@ mod tests {
     }
 
     // Helper function to set up the test environment
-    fn setup_test_environment() -> (PCKey, ROConfig) {
-        tracing::info!("Setting up test environment");
+    fn setup_test_environment(srs_degree: usize) -> (PCKey, ROConfig) {
+        tracing::info!(target: TEST_TARGET, "Setting up test environment");
         let mut rng = test_rng();
 
-        // Setup SRS for Zeromorph - use larger degree for SHA-256 circuit
-        let srs_degree = 4; // 2^4 = 262,144 coefficients
-        tracing::info!("Setting up SRS with degree {}", srs_degree);
+        // Setup SRS for Zeromorph with configurable degree
+        tracing::info!(target: TEST_TARGET, "Setting up SRS with degree {} (2^{} = {} coefficients)", 
+                      srs_degree, srs_degree, 1_usize << srs_degree);
         let srs =
             Z::setup(srs_degree, b"test-hypernova-fold", &mut rng).expect("Failed to set up SRS");
 
         // Trim SRS to get commitment key
-        tracing::debug!("Trimming SRS");
+        tracing::debug!(target: TEST_TARGET, "Trimming SRS");
         let ck = Z::trim(&srs, srs_degree - 1).ck;
 
         // Setup random oracle
         let ro_config = poseidon_config::<CF>();
 
-        tracing::info!("Test environment setup complete");
+        tracing::info!(target: TEST_TARGET, "Test environment setup complete");
         (ck, ro_config)
     }
 
     #[test]
-    fn test_hypernova_fold_reducer_creation() {
+    fn test_TEST_TARGET_creation() {
         let _guard = setup_test_tracing();
-        tracing::info!("Testing HypernovaFoldReducer type compilation");
+        tracing::info!(target: TEST_TARGET, "Testing HypernovaFoldReducer type compilation");
 
-        let (ck, ro_config) = setup_test_environment();
+        let (ck, ro_config) = setup_test_environment(SMALL_SRS_DEGREE);
         let circuit = CubicCircuit::<CF> { _phantom: PhantomData };
 
         // Create a HypernovaFoldReducer to ensure types compile correctly
@@ -284,15 +285,15 @@ mod tests {
             &ro_config,
         );
 
-        tracing::info!("✅ Test for HypernovaFoldReducer type compilation passed");
+        tracing::info!(target: TEST_TARGET, "✅ Test for HypernovaFoldReducer type compilation passed");
     }
 
     #[test]
     fn test_strict_to_acc_conversion() {
         let _guard = setup_test_tracing();
-        tracing::info!("🚀 Starting strict-to-accumulator conversion test");
+        tracing::info!(target: TEST_TARGET, "🚀 Starting strict-to-accumulator conversion test");
 
-        let (ck, ro_config) = setup_test_environment();
+        let (ck, ro_config) = setup_test_environment(SMALL_SRS_DEGREE);
         let circuit = CubicCircuit::<CF> { _phantom: PhantomData };
 
         // Create fold reducer
@@ -302,7 +303,7 @@ mod tests {
             &ro_config,
         );
 
-        tracing::debug!("Testing strict to accumulator conversion...");
+        tracing::debug!(target: TEST_TARGET, "Testing strict to accumulator conversion...");
 
         // Create a step function input
         let input = StepFunctionInput {
@@ -310,7 +311,7 @@ mod tests {
             z_i: vec![CF::from(3u64)], // x = 3, so x^3 + x + 5 = 27 + 3 + 5 = 35
         };
 
-        tracing::debug!("Input: i={}, z_i=[{}]", input.i, input.z_i[0]);
+        tracing::debug!(target: TEST_TARGET, "Input: i={}, z_i=[{}]", input.i, input.z_i[0]);
 
         let span = tracing::info_span!("strict_to_acc_conversion", input_i = %input.i, input_z = %input.z_i[0]);
         let _enter = span.enter();
@@ -318,11 +319,14 @@ mod tests {
         let (lccs_instance, witness) = reducer
             .strict_to_acc(&input)
             .expect("Failed to convert strict to acc");
-        tracing::debug!("Conversion results:");
-        tracing::debug!("   - LCCS instance X length: {}", lccs_instance.X.len());
-        tracing::debug!("   - Witness W length: {}", witness.W.len());
-        tracing::debug!("   - LCCS rs length: {}", lccs_instance.rs.len());
-        tracing::debug!("   - LCCS vs length: {}", lccs_instance.vs.len());
+        tracing::debug!(
+            target: TEST_TARGET,
+            "Conversion results: LCCS X len={}, witness W len={}, rs len={}, vs len={}",
+            lccs_instance.X.len(),
+            witness.W.len(),
+            lccs_instance.rs.len(),
+            lccs_instance.vs.len()
+        );
 
         // The conversion should produce a valid LCCS instance
         assert!(
@@ -331,15 +335,15 @@ mod tests {
         );
         assert!(!witness.W.is_empty(), "Witness should not be empty");
 
-        tracing::info!("✅ Strict to accumulator conversion succeeded");
+        tracing::info!(target: TEST_TARGET, "✅ Strict to accumulator conversion succeeded");
     }
 
     #[test]
     fn test_fold_two_acc_instances() {
         let _guard = setup_test_tracing();
-        tracing::info!("🚀 Starting accumulator folding test");
+        tracing::info!(target: TEST_TARGET, "🚀 Starting accumulator folding test");
 
-        let (ck, ro_config) = setup_test_environment();
+        let (ck, ro_config) = setup_test_environment(SMALL_SRS_DEGREE);
         let circuit = CubicCircuit::<CF> { _phantom: PhantomData };
 
         // Create fold reducer
@@ -349,7 +353,7 @@ mod tests {
             &ro_config,
         );
 
-        tracing::debug!("Creating accumulator instances...");
+        tracing::debug!(target: TEST_TARGET, "Creating accumulator instances...");
 
         // Create two step function inputs
         let input1 = StepFunctionInput {
@@ -362,8 +366,14 @@ mod tests {
             z_i: vec![CF::from(3u64)], // x = 3, so x^3 + x + 5 = 27 + 3 + 5 = 35
         };
 
-        tracing::debug!("Instance 1: i={}, z_i=[{}]", input1.i, input1.z_i[0]);
-        tracing::debug!("Instance 2: i={}, z_i=[{}]", input2.i, input2.z_i[0]);
+        tracing::debug!(
+            target: TEST_TARGET,
+            "Instance inputs: instance1 i={}, z={}, instance2 i={}, z={}",
+            input1.i,
+            input1.z_i[0],
+            input2.i,
+            input2.z_i[0]
+        );
 
         // Convert each strict instance to accumulator with timing
         let acc1 = {
@@ -382,8 +392,9 @@ mod tests {
                 .expect("Failed to convert input2 to acc")
         };
 
-        tracing::debug!("Pre-folding instance sizes:");
+        tracing::debug!(target: TEST_TARGET, "Pre-folding instance sizes:");
         tracing::debug!(
+            target: TEST_TARGET,
             "   Acc1 - X: {}, W: {}, rs: {}, vs: {}",
             acc1.0.X.len(),
             acc1.1.W.len(),
@@ -391,6 +402,7 @@ mod tests {
             acc1.0.vs.len()
         );
         tracing::debug!(
+            target: TEST_TARGET,
             "   Acc2 - X: {}, W: {}, rs: {}, vs: {}",
             acc2.0.X.len(),
             acc2.1.W.len(),
@@ -410,8 +422,9 @@ mod tests {
                 .fold_acc_acc(&[acc1, acc2])
                 .expect("Failed to fold accumulator instances")
         };
-        tracing::debug!("Post-folding instance sizes:");
+        tracing::debug!(target: TEST_TARGET, "Post-folding instance sizes:");
         tracing::debug!(
+            target: TEST_TARGET,
             "   Folded - X: {}, W: {}, rs: {}, vs: {}",
             folded_acc.0.X.len(),
             folded_acc.1.W.len(),
@@ -425,6 +438,108 @@ mod tests {
             "Folded instance should verify"
         );
 
-        tracing::info!("✅ Accumulator folding test passed");
+        tracing::info!(target: TEST_TARGET, "✅ Accumulator folding test passed");
+    }
+
+    #[test]
+    fn test_sha256_tree_fold_four_leaves() {
+        let _guard = setup_test_tracing();
+
+        tracing::info!(target: TEST_TARGET, "🚀 Starting SHA-256 tree folding test");
+        tracing::info!(target: TEST_TARGET, "Using actual SequentialSha256Circuit for real SHA-256 operations");
+
+        let (ck, ro_config) = setup_test_environment(LARGE_SRS_DEGREE);
+        let circuit =
+            crate::tree_folding::circuit::sequential_sha256::SequentialSha256Circuit::<CF>::new();
+
+        // Create fold reducer with SHA-256 circuit
+        let reducer = HypernovaFoldReducer::<G1, Z, _, RO>::new(
+            setup_linearization(circuit).unwrap(),
+            &ck,
+            &ro_config,
+        );
+
+        // Create FoldDriver with our reducer
+        let driver = crate::tree_folding::fold_driver::FoldDriver::new(reducer);
+
+        // Create four leaf instances representing different SHA-256 hash operations
+        const NUM_LEAVES: usize = 4;
+        let mut leaves = Vec::with_capacity(NUM_LEAVES);
+
+        {
+            let span = tracing::info_span!("creating_sha256_leaves", num_leaves = NUM_LEAVES);
+            let _enter = span.enter();
+
+            tracing::info!(target: TEST_TARGET, "📝 Creating SHA-256 leaf instances...");
+
+            // Different input messages for each leaf
+            let messages = [
+                b"hello world".to_vec(),
+                b"nexus zkvm".to_vec(),
+                b"hypernova folding".to_vec(),
+                b"sha256 circuit".to_vec(),
+            ];
+
+            for i in 0..NUM_LEAVES {
+                // Calculate the initial SHA-256 hash for each message
+                let initial_hash =
+                    crate::tree_folding::circuit::sha256::calculate_sha256_native(&messages[i]);
+                let hash_as_field =
+                    crate::tree_folding::circuit::sha256::conversions::bytes_to_field::<CF>(
+                        &initial_hash,
+                    );
+
+                tracing::info!(target: TEST_TARGET, "Leaf {}: Message = \"{}\"", i, String::from_utf8_lossy(&messages[i]));
+                tracing::info!(target: TEST_TARGET, "  Initial SHA-256 hash: {}", hex::encode(&initial_hash));
+
+                let input = StepFunctionInput {
+                    i: CF::from(i as u64),
+                    z_i: vec![hash_as_field], // Use actual SHA-256 hash as field element
+                };
+                leaves.push(input);
+            }
+        }
+
+        tracing::info!(target: TEST_TARGET, "📝 Created {} SHA-256 leaf instances. Each leaf contains:\n  - Initial SHA-256 hash: 1 field element (32 bytes packed)\n  - Circuit performs: Sequential SHA-256 operation", NUM_LEAVES);
+
+        // Fold the tree to get the root
+        let root = {
+            let span = tracing::info_span!("sha256_tree_folding", num_leaves = NUM_LEAVES);
+            let _enter = span.enter();
+
+            tracing::info!(target: TEST_TARGET, "🌳 Performing SHA-256 tree folding...");
+            driver
+                .fold_root(&leaves)
+                .expect("Failed to fold SHA-256 tree")
+        };
+
+        tracing::info!(target: TEST_TARGET, "📊 SHA-256 tree folding results:");
+
+        // The root should be a valid accumulator instance
+        let (lccs_instance, witness) = root;
+        assert!(
+            !lccs_instance.X.is_empty(),
+            "Root LCCS instance should have public inputs"
+        );
+        assert!(!witness.W.is_empty(), "Root witness should not be empty");
+
+        // Verify that the public inputs match our expected structure
+        tracing::info!(target: TEST_TARGET, "📈 SHA-256 FOLDING SUMMARY: public_inputs={} witness_size={} num_leaves={}",
+            lccs_instance.X.len(),
+            witness.W.len(),
+            NUM_LEAVES
+        );
+
+        // Additional verification: show the final computed value
+        if let Some(final_value) = lccs_instance.X.get(0) {
+            tracing::info!(target: TEST_TARGET, "Final root value: {}", final_value);
+
+            // Convert the final field element back to bytes to see the final hash
+            let final_hash_bytes =
+                crate::tree_folding::circuit::sha256::conversions::field_to_bytes(final_value);
+            tracing::info!(target: TEST_TARGET, "Final root hash: {}", hex::encode(&final_hash_bytes));
+        }
+
+        tracing::info!(target: TEST_TARGET, "✅ SHA-256 tree folding test completed successfully");
     }
 }
