@@ -12,6 +12,7 @@ use merlin::Transcript;
 
 use crate::LOG_TARGET;
 
+#[derive(Debug)]
 pub struct Zeromorph<E>(PhantomData<E>);
 
 impl<E> ark_spartan::polycommitments::PolyCommitmentScheme<E::G1> for Zeromorph<E>
