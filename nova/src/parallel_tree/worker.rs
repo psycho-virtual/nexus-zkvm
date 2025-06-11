@@ -2,13 +2,11 @@ use crossbeam_queue::ArrayQueue;
 use std::fmt::{self, Debug, Formatter};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
-use std::sync::Once;
 
 use super::block_pool::{BlockPool, Payload};
 use super::task::{Task, TaskHeap};
 use crate::fold_reducer::FoldReducer;
-use crate::parallel_tree::{BufHandle, BufId};
+use crate::parallel_tree::BufHandle;
 
 // -----------------------------------------------------------------------------
 // Worker local state
@@ -101,11 +99,19 @@ impl<P: WorkerParams> WorkerLocal<P> {
         while stop.load(Ordering::Acquire) == 0 {
             // Priority 1 – ready tasks (tasks that are READY and need to be consumed)
             if let Some(task_idx) = self.ready_q.pop() {
-                if let Err(err) = self.process_ready_inner_node(task_idx) {
-                    tracing::error!(target: WORKER_TARGET,
-                        "❌ Worker {}: Failed to process inner node {}: {}",
-                        self.id, task_idx, err
-                    );
+                match self.process_ready_inner_node(task_idx) {
+                    Ok(()) => {
+                        // Check if computation is complete and signal all workers to stop
+                        if self.check_and_signal_completion(task_idx, &stop) {
+                            break; // Exit the loop immediately after processing root
+                        }
+                    }
+                    Err(err) => {
+                        tracing::error!(target: WORKER_TARGET,
+                            "❌ Worker {}: Failed to process inner node {}: {}",
+                            self.id, task_idx, err
+                        );
+                    }
                 }
                 continue;
             }
@@ -123,6 +129,23 @@ impl<P: WorkerParams> WorkerLocal<P> {
 
             // Yield – nothing to do right now.
             std::thread::yield_now();
+        }
+    }
+
+    /// Check if the root node was processed and signal completion to all workers
+    /// Returns true if the computation is complete and the worker should exit
+    #[tracing::instrument(skip_all, fields(task_idx, worker_id = self.id), name = "check_and_signal_completion", level = "debug", target = WORKER_TARGET)]
+    fn check_and_signal_completion(&self, task_idx: usize, stop: &Arc<AtomicUsize>) -> bool {
+        // Check if we just processed the root node (computation complete)
+        if task_idx == 0 {
+            tracing::info!(target: WORKER_TARGET,
+                "🎉 Worker {}: Root node processed successfully, signaling completion",
+                self.id
+            );
+            stop.store(1, Ordering::Release);
+            true // Signal that the worker should exit
+        } else {
+            false // Continue processing
         }
     }
 
@@ -473,8 +496,9 @@ impl<P: WorkerParams> Debug for WorkerLocal<P> {
 mod tests {
     use super::*;
     use std::time::Duration;
+    use std::sync::Once;
     use tracing_subscriber::{
-        fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter,
+        fmt::format::FmtSpan, layer::SubscriberExt, EnvFilter,
     };
 
     const TEST_TARGET: &str = "nexus-nova::parallel_tree::worker::tests";
@@ -570,40 +594,6 @@ mod tests {
         type Error = ();
     }
 
-    /// Helper function to check if all non-root nodes are consumed and root has the expected value
-    fn check_processing_complete_with_expected_root_value(
-        task_heap: &TaskHeap,
-        pool: &BlockPool<LeafPayload>,
-        expected_root_value: LeafPayload,
-    ) -> bool {
-        // Check if all non-root nodes are consumed
-        let all_non_root_consumed = (1..task_heap.size()).all(|node_idx| {
-            task_heap.get(node_idx).map_or(false, |task| match task {
-                Task::Leaf(leaf) => {
-                    leaf.get_state() == crate::parallel_tree::task::leaf_state::CONSUMED
-                }
-                Task::Node(node) => {
-                    node.get_state() == crate::parallel_tree::task::node_state::CONSUMED
-                }
-            })
-        });
-
-        // Check if root has correct value and is in PROCESSED_WAITING_FOR_CONSUMPTION state
-        let root_correct = task_heap.get(0).map_or(false, |task| match task {
-            Task::Node(root_node) => {
-                root_node.get_state()
-                    == crate::parallel_tree::task::node_state::PROCESSED_WAITING_FOR_CONSUMPTION
-                    && root_node
-                        .get_buf_id_if_ready()
-                        .and_then(|buf_id| pool.claim(buf_id))
-                        .map_or(false, |handle| handle.read() == expected_root_value)
-            }
-            _ => false,
-        });
-
-        all_non_root_consumed && root_correct
-    }
-
     /// Helper function to assert final state for test verification
     fn assert_final_processing_state(
         task_heap: &TaskHeap,
@@ -655,38 +645,25 @@ mod tests {
         }
     }
 
-    /// Polls until processing is complete with expected root value, with debug logging
+    /// Polls until workers signal completion via the stop flag
     ///
     /// # Arguments
-    /// * `task_heap` - The task heap to check
-    /// * `pool` - The buffer pool for metrics
-    /// * `ready_q` - Ready queue for metrics
-    /// * `leaf_queue` - Leaf queue for metrics  
-    /// * `expected_root_value` - Expected value in the root node
+    /// * `stop` - The stop flag that workers set when computation completes
     /// * `timeout_iterations` - Maximum iterations before timeout
     /// * `debug_interval` - How often to log debug info
     ///
     /// # Returns
-    /// * `true` if processing completed successfully within timeout
+    /// * `true` if workers signaled completion within timeout
     /// * `false` if timeout was reached
     #[tracing::instrument(
         target = TEST_TARGET,
         level = "debug",
         skip_all,
-        fields(
-            expected_root_value = ?expected_root_value,
-            timeout_iterations,
-            debug_interval,
-            task_heap_size = task_heap.size()
-        ),
+        fields(timeout_iterations, debug_interval),
         name = "poll_until_processing_complete"
     )]
     fn poll_until_processing_complete(
-        task_heap: &TaskHeap,
-        pool: &BlockPool<LeafPayload>,
-        ready_q: &ArrayQueue<usize>,
-        leaf_queue: &ArrayQueue<(LeafPayload, usize)>,
-        expected_root_value: LeafPayload,
+        stop: &Arc<AtomicUsize>,
         timeout_iterations: usize,
         debug_interval: usize,
     ) -> bool {
@@ -696,20 +673,13 @@ mod tests {
                 tracing::debug!(
                     target: TEST_TARGET,
                     iteration = i,
-                    task_heap = ?&*task_heap,
-                    ready_q_len = ready_q.len(),
-                    leaf_q_len = leaf_queue.len(),
-                    pool_free = pool.free_count(),
+                    stop_flag = stop.load(Ordering::Acquire),
                     "Polling iteration status"
                 );
             }
 
-            // Check if processing is complete
-            if check_processing_complete_with_expected_root_value(
-                task_heap,
-                pool,
-                expected_root_value,
-            ) {
+            // Check if workers have signaled completion
+            if stop.load(Ordering::Acquire) != 0 {
                 return true;
             }
 
@@ -801,6 +771,7 @@ mod tests {
         };
 
         // Wait until the worker processes the leaf (leaf should become ready)
+        // Note: Single leaf test doesn't trigger root processing, so we check leaf state directly
         let processed = poll_until_condition_simple(
             || {
                 task_heap.get(leaf_idx).map_or(false, |task| match task {
@@ -906,11 +877,7 @@ mod tests {
 
         // Wait until all processing is complete
         let all_processed = poll_until_processing_complete(
-            &task_heap,
-            &pool,
-            &ready_q,
-            &leaf_queue,
-            LeafPayload(30),
+            &stop,
             1000, // timeout_iterations
             100,  // debug_interval
         );
@@ -1002,11 +969,7 @@ mod tests {
 
         // Wait until all processing is complete
         let all_processed = poll_until_processing_complete(
-            &task_heap,
-            &pool,
-            &ready_q,
-            &leaf_queue,
-            LeafPayload(10),
+            &stop,
             2000, // timeout_iterations
             200,  // debug_interval
         );
