@@ -25,9 +25,9 @@ use ark_ff::{Field, PrimeField};
 use ark_r1cs_std::{alloc::AllocVar, fields::fp::FpVar};
 use ark_relations::r1cs::{ConstraintSystem, SynthesisError, SynthesisMode};
 use ark_spartan::polycommitments::PolyCommitmentScheme;
+use tracing::instrument;
 
-// Tracing target for linearization operations
-const LINEARIZATION_TARGET: &str = "linearization";
+const LOG_TARGET: &str = "nexus-nova::ccs::linearization";
 
 /// Input structure for step function linearization
 #[derive(Debug, Clone)]
@@ -80,71 +80,64 @@ pub struct LCCSLinearization<G: CurveGroup, C: PolyCommitmentScheme<G>> {
 ///
 /// # Returns
 /// * `LinearizationParams` containing the precomputed shape and circuit
+#[instrument(level = "debug", name = "setup_linearization", target = LOG_TARGET)]
 pub fn setup_linearization<G, SC>(step_circuit: SC) -> Result<LinearizationParams<G, SC>, Error>
 where
     G: CurveGroup,
     G::ScalarField: PrimeField,
-    SC: StepCircuit<G::ScalarField>,
+    SC: StepCircuit<G::ScalarField> + std::fmt::Debug,
 {
-    use std::time::Instant;
-    let start_time = Instant::now();
+    // Create constraint system in Setup mode for shape compilation
+    let (shape_cs, dummy_variables) =
+        tracing::debug_span!(target: LOG_TARGET, "constraint_system_setup").in_scope(|| {
+            let shape_cs = ConstraintSystem::<G::ScalarField>::new_ref();
+            shape_cs.set_mode(SynthesisMode::Setup);
 
-    tracing::info!(target: LINEARIZATION_TARGET, "🔧 Starting linearization setup for step circuit");
-    tracing::debug!(target: LINEARIZATION_TARGET, "Circuit ARITY: {}", SC::ARITY);
+            // Create dummy variables for shape compilation
+            let dummy_i = FpVar::new_witness(shape_cs.clone(), || Ok(G::ScalarField::ZERO))?;
+            let dummy_z: Vec<FpVar<G::ScalarField>> = (0..SC::ARITY)
+                .map(|i| FpVar::new_witness(shape_cs.clone(), || Ok(G::ScalarField::ZERO)))
+                .collect::<Result<Vec<_>, _>>()?;
 
-    // ---------- 1. once: compile shape & cache matrices ------------------------
-    let cs_setup_start = Instant::now();
-    tracing::debug!(target: LINEARIZATION_TARGET, "Creating constraint system in Setup mode");
+            tracing::debug!(
+                "Constraint system setup completed with {} dummy variables",
+                1 + SC::ARITY
+            );
 
-    let shape_cs = ConstraintSystem::<G::ScalarField>::new_ref();
-    shape_cs.set_mode(SynthesisMode::Setup);
-
-    // Create blank circuit for shape compilation
-    // We need to allocate dummy variables with the right structure
-    let dummy_alloc_start = Instant::now();
-    let dummy_i = FpVar::new_witness(shape_cs.clone(), || Ok(G::ScalarField::ZERO))?;
-    let dummy_z: Result<Vec<_>, _> = (0..SC::ARITY)
-        .map(|_| FpVar::new_witness(shape_cs.clone(), || Ok(G::ScalarField::ZERO)))
-        .collect();
-    let dummy_z = dummy_z?;
-    let dummy_alloc_time = dummy_alloc_start.elapsed();
-
-    tracing::debug!(target: LINEARIZATION_TARGET, "Dummy variable allocation time: {:?}", dummy_alloc_time);
+            Ok::<_, Error>((shape_cs, (dummy_i, dummy_z)))
+        })?;
 
     // Generate constraints to extract the shape
-    let constraint_gen_start = Instant::now();
-    tracing::debug!(target: LINEARIZATION_TARGET, "Generating constraints for shape extraction");
+    tracing::debug_span!(target: LOG_TARGET, "constraint_generation").in_scope(|| {
+        let _dummy_output = step_circuit.generate_constraints(
+            shape_cs.clone(),
+            &dummy_variables.0,
+            &dummy_variables.1,
+        );
+    });
 
-    let _dummy_output = step_circuit.generate_constraints(shape_cs.clone(), &dummy_i, &dummy_z)?;
-    let constraint_gen_time = constraint_gen_start.elapsed();
-
-    tracing::debug!(target: LINEARIZATION_TARGET, "Constraint generation time: {:?}", constraint_gen_time);
-
-    let finalize_start = Instant::now();
-    shape_cs.finalize();
-    let finalize_time = finalize_start.elapsed();
-
-    tracing::debug!(target: LINEARIZATION_TARGET, "Constraint system finalization time: {:?}", finalize_time);
-
-    let cs_setup_time = cs_setup_start.elapsed();
-    tracing::debug!(target: LINEARIZATION_TARGET, "Total constraint system setup time: {:?}", cs_setup_time);
+    // Finalize the constraint system
+    tracing::debug_span!(target: LOG_TARGET, "constraint_system_finalization").in_scope(|| {
+        shape_cs.finalize();
+    });
 
     // Convert R1CS to CCS shape
-    let conversion_start = Instant::now();
-    tracing::debug!(target: LINEARIZATION_TARGET, "Converting R1CS to CCS shape");
+    let ccs_shape =
+        tracing::debug_span!(target: LOG_TARGET, "r1cs_to_ccs_conversion").in_scope(|| {
+            let r1cs_shape = crate::r1cs::R1CSShape::from(shape_cs.clone());
+            let ccs_shape = CCSShape::from(r1cs_shape);
 
-    let r1cs_shape = crate::r1cs::R1CSShape::from(shape_cs.clone());
-    let ccs_shape = CCSShape::from(r1cs_shape);
-    let conversion_time = conversion_start.elapsed();
+            tracing::debug!(
+                "CCS shape - matrices: {}, constraints: {}, vars: {}",
+                ccs_shape.num_matrices,
+                ccs_shape.num_constraints,
+                ccs_shape.num_vars
+            );
 
-    tracing::debug!(target: LINEARIZATION_TARGET, "R1CS to CCS conversion time: {:?}", conversion_time);
-    tracing::debug!(target: LINEARIZATION_TARGET, "CCS shape - matrices: {}, constraints: {}, vars: {}", 
-        ccs_shape.num_matrices, ccs_shape.num_constraints, ccs_shape.num_vars);
+            ccs_shape
+        });
 
-    let total_time = start_time.elapsed();
-    tracing::info!(target: LINEARIZATION_TARGET, "✅ Linearization setup completed in {:?}", total_time);
-    tracing::debug!(target: LINEARIZATION_TARGET, "Setup breakdown - CS: {:?}, conversion: {:?}", 
-        cs_setup_time, conversion_time);
+    tracing::info!("✅ Linearization setup completed");
 
     Ok(LinearizationParams { ccs_shape, step_circuit })
 }
@@ -163,6 +156,12 @@ where
 ///
 /// # Returns
 /// * `LinearizationResult` containing the CCS shape, instance, and linearization
+#[instrument(
+    level = "debug", 
+    skip(params, ck, random_oracle), 
+    name = "synthesize_and_linearize_step", 
+    target = LOG_TARGET
+)]
 pub fn synthesize_and_linearize_step<G, C, SC, RO>(
     params: &LinearizationParams<G, SC>,
     input: &StepFunctionInput<G::ScalarField>,
@@ -176,22 +175,10 @@ where
     SC: StepCircuit<G::ScalarField>,
     RO: CryptographicSponge,
 {
-    use std::time::Instant;
-    let start_time = Instant::now();
-
-    tracing::debug!(target: LINEARIZATION_TARGET, "🔄 Starting step circuit synthesis and linearization");
-    tracing::debug!(target: LINEARIZATION_TARGET, "Input step index: {}, state vector length: {}", 
-        input.i, input.z_i.len());
-
     // Step 1: Synthesize witness using precomputed shape
-    let synthesis_start = Instant::now();
     let (ccs_instance, witness) = synthesize_step_circuit_with_params(params, input, ck)?;
-    let synthesis_time = synthesis_start.elapsed();
-
-    tracing::debug!(target: LINEARIZATION_TARGET, "Witness synthesis completed in {:?}", synthesis_time);
 
     // Step 2: Run the linearization algorithm
-    let linearization_start = Instant::now();
     let linearization = linearize_ccs(
         &params.ccs_shape,
         &ccs_instance,
@@ -199,14 +186,8 @@ where
         ck,
         random_oracle,
     )?;
-    let linearization_time = linearization_start.elapsed();
 
-    tracing::debug!(target: LINEARIZATION_TARGET, "Linearization completed in {:?}", linearization_time);
-
-    let total_time = start_time.elapsed();
-    tracing::debug!(target: LINEARIZATION_TARGET, "✅ Total synthesis and linearization time: {:?}", total_time);
-    tracing::debug!(target: LINEARIZATION_TARGET, "Time breakdown - synthesis: {:?}, linearization: {:?}", 
-        synthesis_time, linearization_time);
+    tracing::info!("✅ Total synthesis and linearization completed");
 
     Ok(LinearizationResult {
         ccs_shape: params.ccs_shape.clone(),
@@ -219,6 +200,18 @@ where
 ///
 /// This function efficiently generates the witness by reusing precomputed constraint
 /// matrices and only computing the witness assignments.
+#[instrument(
+    target = LOG_TARGET,
+    level = "debug",
+    name = "synthesize_step_circuit_with_params",
+    skip(ck, params, input),
+    fields(
+        num_matrices = params.ccs_shape.num_matrices,
+        num_constraints = params.ccs_shape.num_constraints,
+        step_index = %input.i,
+        state_len = input.z_i.len()
+    )
+)]
 pub fn synthesize_step_circuit_with_params<G, C, SC>(
     params: &LinearizationParams<G, SC>,
     input: &StepFunctionInput<G::ScalarField>,
@@ -230,23 +223,12 @@ where
     C: PolyCommitmentScheme<G>,
     SC: StepCircuit<G::ScalarField>,
 {
-    use std::time::Instant;
-    let start_time = Instant::now();
 
-    tracing::debug!(target: LINEARIZATION_TARGET, "🔧 Synthesizing step circuit witness");
-    tracing::debug!(target: LINEARIZATION_TARGET, "Using precomputed CCS shape with {} matrices, {} constraints", 
-        params.ccs_shape.num_matrices, params.ccs_shape.num_constraints);
-
-    // ---------- 2. every proof: build the witness only -------------------------
-    let cs_create_start = Instant::now();
+    // Create constraint system for witness synthesis only
     let cs = ConstraintSystem::new_ref();
     cs.set_mode(SynthesisMode::Prove { construct_matrices: false }); // no A/B/C reconstruction
-    let cs_create_time = cs_create_start.elapsed();
-
-    tracing::debug!(target: LINEARIZATION_TARGET, "Constraint system creation time: {:?}", cs_create_time);
 
     // Allocate step index and state variables with actual values
-    let var_alloc_start = Instant::now();
     let i_var = FpVar::new_witness(cs.clone(), || Ok(input.i))?;
     let z_vars: Result<Vec<_>, _> = input
         .z_i
@@ -254,64 +236,44 @@ where
         .map(|&z| FpVar::new_witness(cs.clone(), || Ok(z)))
         .collect();
     let z_vars = z_vars?;
-    let var_alloc_time = var_alloc_start.elapsed();
 
-    tracing::debug!(target: LINEARIZATION_TARGET, "Variable allocation time: {:?} (allocated {} variables)", 
-        var_alloc_time, 1 + input.z_i.len());
+    tracing::trace!(
+        target: LOG_TARGET,
+        "Variable allocation completed (allocated {} variables)",
+        1 + input.z_i.len()
+    );
 
     // Generate constraints for the step circuit (witness only)
-    let constraint_gen_start = Instant::now();
-    tracing::debug!(target: LINEARIZATION_TARGET, "Generating constraints for witness synthesis");
-
     let _z_next = params
         .step_circuit
         .generate_constraints(cs.clone(), &i_var, &z_vars)?;
-    let constraint_gen_time = constraint_gen_start.elapsed();
-
-    tracing::debug!(target: LINEARIZATION_TARGET, "Constraint generation time: {:?}", constraint_gen_time);
 
     // Finalize the constraint system
-    let finalize_start = Instant::now();
     cs.finalize();
-    let finalize_time = finalize_start.elapsed();
-
-    tracing::debug!(target: LINEARIZATION_TARGET, "Constraint system finalization time: {:?}", finalize_time);
 
     // Extract the constraint system data
-    let extract_start = Instant::now();
-    let cs_borrow = cs.borrow().unwrap();
+    let cs_borrow = cs.borrow().ok_or(Error::NotSatisfied)?;
     let witness_assignment = cs_borrow.witness_assignment.clone();
     let public_assignment = cs_borrow.instance_assignment.clone();
-    let extract_time = extract_start.elapsed();
 
-    tracing::debug!(target: LINEARIZATION_TARGET, "Assignment extraction time: {:?} (witness: {}, public: {})", 
-        extract_time, witness_assignment.len(), public_assignment.len());
+    tracing::debug!(
+        target: LOG_TARGET,
+        "Assignment extraction completed (witness: {}, public: {})",
+        witness_assignment.len(),
+        public_assignment.len()
+    );
 
     // Create witness and instance using precomputed shape
-    let witness_create_start = Instant::now();
     let witness = CCSWitness::new(&params.ccs_shape, &witness_assignment)?;
-    let witness_create_time = witness_create_start.elapsed();
 
-    tracing::debug!(target: LINEARIZATION_TARGET, "Witness creation time: {:?} (W length: {})", 
-        witness_create_time, witness.W.len());
-
-    let commit_start = Instant::now();
     let commitment_W = witness.commit::<C>(ck);
-    let commit_time = commit_start.elapsed();
 
-    tracing::debug!(target: LINEARIZATION_TARGET, "Witness commitment time: {:?}", commit_time);
-
-    let instance_create_start = Instant::now();
     let ccs_instance = CCSInstance::new(&params.ccs_shape, &commitment_W, &public_assignment)?;
-    let instance_create_time = instance_create_start.elapsed();
-
-    tracing::debug!(target: LINEARIZATION_TARGET, "Instance creation time: {:?} (X length: {})", 
-        instance_create_time, ccs_instance.X.len());
-
-    let total_time = start_time.elapsed();
-    tracing::info!(target: LINEARIZATION_TARGET, "✅ Witness synthesis completed in {:?}", total_time);
-    tracing::debug!(target: LINEARIZATION_TARGET, "Synthesis breakdown - CS setup: {:?}, constraints: {:?}, witness: {:?}, commit: {:?}", 
-        cs_create_time + var_alloc_time + finalize_time, constraint_gen_time, witness_create_time, commit_time);
+    tracing::debug!(
+        target: LOG_TARGET,
+        "Instance creation completed (X length: {})",
+        ccs_instance.X.len()
+    );
 
     Ok((ccs_instance, witness))
 }
@@ -333,6 +295,18 @@ where
 ///
 /// # Returns
 /// * `LCCSLinearization` containing the linearized instance, witness, and proof
+#[instrument(
+    target = LOG_TARGET,
+    level = "debug",
+    skip(shape, instance, witness, ck, random_oracle),
+    fields(
+        instance_x_len = instance.X.len(),
+        witness_w_len = witness.W.len(),
+        num_matrices = shape.num_matrices,
+        num_constraints = shape.num_constraints,
+        num_vars = shape.num_vars
+    )
+)]
 pub fn linearize_ccs<G, C, RO>(
     shape: &CCSShape<G>,
     instance: &CCSInstance<G, C>,
@@ -346,119 +320,122 @@ where
     C: PolyCommitmentScheme<G>,
     RO: CryptographicSponge,
 {
-    use std::time::Instant;
-    let start_time = Instant::now();
-
-    tracing::info!(target: LINEARIZATION_TARGET, "🔄 Starting CCS to LCCS linearization");
-    tracing::debug!(target: LINEARIZATION_TARGET, "CCS instance - X length: {}, W length: {}", 
-        instance.X.len(), witness.W.len());
-    tracing::debug!(target: LINEARIZATION_TARGET, "CCS shape - matrices: {}, constraints: {}, vars: {}", 
-        shape.num_matrices, shape.num_constraints, shape.num_vars);
-
     // Step 1: Verify the CCS instance is satisfied (optional check)
-    let verify_start = Instant::now();
-    shape.is_satisfied(instance, witness, ck)?;
-    let verify_time = verify_start.elapsed();
-
-    tracing::debug!(target: LINEARIZATION_TARGET, "CCS satisfaction check time: {:?}", verify_time);
+    tracing::debug_span!(target: LOG_TARGET, "ccs_satisfaction_check").in_scope(|| {
+        shape.is_satisfied(instance, witness, ck)?;
+        Ok::<_, Error>(())
+    })?;
 
     // Step 2: Sample challenges from random oracle
-    let challenge_start = Instant::now();
-    tracing::debug!(target: LINEARIZATION_TARGET, "Sampling challenges from random oracle");
+    let (gamma, beta, s) = tracing::debug_span!(target: LOG_TARGET, "challenge_sampling").in_scope(|| {
+        // Sample γ ← F
+        let gamma: G::ScalarField = random_oracle.squeeze_field_elements(1)[0];
+        // Sample β ← F^s
+        let s = safe_loglike!(shape.num_constraints) as usize;
+        let beta = random_oracle.squeeze_field_elements(s);
 
-    // Sample γ ← F
-    let gamma: G::ScalarField = random_oracle.squeeze_field_elements(1)[0];
-    // Sample β ← F^s
-    let s = safe_loglike!(shape.num_constraints) as usize;
-    let beta = random_oracle.squeeze_field_elements(s);
-    let challenge_time = challenge_start.elapsed();
+        tracing::debug!("Challenge sampling completed (γ, β with {} elements)", s);
 
-    tracing::debug!(target: LINEARIZATION_TARGET, "Challenge sampling time: {:?} (γ, β with {} elements)", 
-        challenge_time, s);
+        (gamma, beta, s)
+    });
 
     // Step 3: Construct the g(x) CCS folding polynomial for sum-check
-    let poly_construct_start = Instant::now();
-    tracing::debug!(target: LINEARIZATION_TARGET, "Constructing CCS polynomial for sum-check");
+    let (z, polynomial) = tracing::debug_span!(
+        target: LOG_TARGET,
+        "polynomial_construction",
+        z_total_len = instance.X.len() + witness.W.len()
+    )
+    .in_scope(|| {
+        let z = [instance.X.as_slice(), witness.W.as_slice()].concat();
+        let polynomial = construct_css_polynomial(shape, &z, &beta, gamma)?;
 
-    let z = [instance.X.as_slice(), witness.W.as_slice()].concat();
-    let polynomial = construct_css_polynomial(shape, &z, &beta, gamma)?;
-    let poly_construct_time = poly_construct_start.elapsed();
-
-    tracing::debug!(target: LINEARIZATION_TARGET, "Polynomial construction time: {:?} (z length: {})", 
-        poly_construct_time, z.len());
+        Ok::<_, Error>((z, polynomial))
+    })?;
 
     // Step 4: Run the sum-check protocol
-    let sumcheck_start = Instant::now();
-    tracing::debug!(target: LINEARIZATION_TARGET, "Running ML sum-check protocol");
+    let (sumcheck_proof, r_x) = tracing::debug_span!(target: LOG_TARGET, "sumcheck_protocol").in_scope(|| {
+        tracing::debug!("Running ML sum-check protocol");
 
-    // The claimed sum should be 0 for a satisfied CCS instance
-    let (sumcheck_proof, prover_state) =
-        MLSumcheck::prove_as_subprotocol(random_oracle, &polynomial);
-    let sumcheck_time = sumcheck_start.elapsed();
+        // The claimed sum should be 0 for a satisfied CCS instance
+        let (sumcheck_proof, prover_state) =
+            MLSumcheck::prove_as_subprotocol(random_oracle, &polynomial);
 
-    tracing::debug!(target: LINEARIZATION_TARGET, "Sum-check protocol time: {:?} (proof rounds: {})", 
-        sumcheck_time, sumcheck_proof.len());
+        // Extract the random evaluation point from sum-check
+        let r_x = prover_state.randomness;
 
-    // Extract the random evaluation point from sum-check
-    let r_x = prover_state.randomness;
-    tracing::debug!(target: LINEARIZATION_TARGET, "Sum-check evaluation point r_x length: {}", r_x.len());
+        tracing::debug!(
+            "Sum-check protocol completed (proof rounds: {}, r_x length: {})",
+            sumcheck_proof.len(),
+            r_x.len()
+        );
+
+        (sumcheck_proof, r_x)
+    });
 
     // Step 5: Compute the theta values
-    let theta_start = Instant::now();
-    tracing::debug!(target: LINEARIZATION_TARGET, "Computing theta values (matrix evaluations)");
+    let vs = tracing::debug_span!(target: LOG_TARGET, "theta_computation", num_matrices = shape.num_matrices)
+        .in_scope(|| {
+            tracing::debug!("Computing theta values (matrix evaluations)");
 
-    // θ_j = Σ_{y∈{0,1}^s'} M_j(r'_x, y) · z(y)
-    let vs: Vec<G::ScalarField> = (0..shape.num_matrices)
-        .map(|j| {
-            let M_j_z = shape.Ms[j].multiply_vec(&z);
-            vec_to_mle(M_j_z.as_slice()).evaluate::<G>(r_x.as_slice())
-        })
-        .collect();
-    let theta_time = theta_start.elapsed();
+            // θ_j = Σ_{y∈{0,1}^s'} M_j(r'_x, y) · z(y)
+            let vs: Vec<G::ScalarField> = (0..shape.num_matrices)
+                .map(|j| {
+                    let M_j_z = shape.Ms[j].multiply_vec(&z);
+                    vec_to_mle(M_j_z.as_slice()).evaluate::<G>(r_x.as_slice())
+                })
+                .collect();
 
-    tracing::debug!(target: LINEARIZATION_TARGET, "Theta computation time: {:?} (computed {} theta values)", 
-        theta_time, vs.len());
+            tracing::debug!(
+                "Theta computation completed (computed {} theta values)",
+                vs.len()
+            );
+
+            vs
+        });
 
     // Step 6: Build the LCCS instance
-    let lccs_build_start = Instant::now();
-    tracing::debug!(target: LINEARIZATION_TARGET, "Building LCCS instance");
+    let lccs_instance = tracing::debug_span!(target: LOG_TARGET, "lccs_instance_creation").in_scope(|| {
+        tracing::debug!("Building LCCS instance");
 
-    // The commitment is the same as the original CCS instance
-    let commitment_W = instance.commitment_W.clone();
+        // The commitment is the same as the original CCS instance
+        let commitment_W = instance.commitment_W.clone();
 
-    // The public inputs X remain the same, with u = 1 (as specified in the algorithm)
-    let mut X = instance.X.clone();
-    if !X.is_empty() {
-        X[0] = G::ScalarField::ONE; // Ensure u = 1
-    }
+        // The public inputs X remain the same, with u = 1 (as specified in the algorithm)
+        let mut X = instance.X.clone();
+        if !X.is_empty() {
+            X[0] = G::ScalarField::ONE; // Ensure u = 1
+        }
 
-    let lccs_instance = LCCSInstance::new(shape, &commitment_W, &X, &r_x, &vs)?;
-    let lccs_build_time = lccs_build_start.elapsed();
+        let lccs_instance = LCCSInstance::new(shape, &commitment_W, &X, &r_x, &vs)?;
 
-    tracing::debug!(target: LINEARIZATION_TARGET, "LCCS instance creation time: {:?}", lccs_build_time);
+        tracing::debug!("LCCS instance creation completed");
+
+        Ok::<_, Error>(lccs_instance)
+    })?;
 
     // Step 7: Verify the linearized instance is satisfied
-    let verify_lccs_start = Instant::now();
-    shape.is_satisfied_linearized(&lccs_instance, witness, ck)?;
-    let verify_lccs_time = verify_lccs_start.elapsed();
-
-    tracing::debug!(target: LINEARIZATION_TARGET, "LCCS satisfaction check time: {:?}", verify_lccs_time);
+    tracing::debug_span!(target: LOG_TARGET, "lccs_satisfaction_check").in_scope(|| {
+        shape.is_satisfied_linearized(&lccs_instance, witness, ck)?;
+        tracing::debug!("LCCS satisfaction check completed");
+        Ok::<_, Error>(())
+    })?;
 
     // Convert sumcheck proof to field elements for storage
-    let proof_convert_start = Instant::now();
-    let sumcheck_proof_elements: Vec<G::ScalarField> = sumcheck_proof
-        .iter()
-        .flat_map(|round_proof| round_proof.evaluations.clone())
-        .collect();
-    let proof_convert_time = proof_convert_start.elapsed();
+    let sumcheck_proof_elements = tracing::debug_span!(target: LOG_TARGET, "proof_conversion").in_scope(|| {
+        let sumcheck_proof_elements: Vec<G::ScalarField> = sumcheck_proof
+            .iter()
+            .flat_map(|round_proof| round_proof.evaluations.clone())
+            .collect();
 
-    tracing::debug!(target: LINEARIZATION_TARGET, "Proof conversion time: {:?} (elements: {})", 
-        proof_convert_time, sumcheck_proof_elements.len());
+        tracing::debug!(
+            "Proof conversion completed (elements: {})",
+            sumcheck_proof_elements.len()
+        );
 
-    let total_time = start_time.elapsed();
-    tracing::info!(target: LINEARIZATION_TARGET, "✅ CCS to LCCS linearization completed in {:?}", total_time);
-    tracing::debug!(target: LINEARIZATION_TARGET, "Linearization breakdown - verify: {:?}, challenges: {:?}, polynomial: {:?}, sumcheck: {:?}, theta: {:?}, build: {:?}", 
-        verify_time + verify_lccs_time, challenge_time, poly_construct_time, sumcheck_time, theta_time, lccs_build_time);
+        sumcheck_proof_elements
+    });
+
+    tracing::info!("✅ CCS to LCCS linearization completed");
 
     Ok(LCCSLinearization {
         lccs_instance,
@@ -534,15 +511,17 @@ mod tests {
     use tracing_subscriber::{
         filter, fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt,
     };
+    use derivative::Derivative;
 
     type Z = Zeromorph<Bn254>;
 
     // Tracing target for linearization tests
-    const TEST_TARGET: &str = "linearization";
+    const TEST_TARGET: &str = "nexus-nova::ccs::linearization::tests";
 
-    // Helper function to set up tracing for tests
     fn setup_test_tracing() -> tracing::subscriber::DefaultGuard {
-        let filter = filter::Targets::new().with_target(TEST_TARGET, tracing::Level::DEBUG);
+        let filter = filter::Targets::new()
+            .with_target(TEST_TARGET, tracing::Level::DEBUG)
+            .with_target(LOG_TARGET, tracing::Level::DEBUG);
         tracing_subscriber::registry()
             .with(
                 tracing_subscriber::fmt::layer()
@@ -554,8 +533,10 @@ mod tests {
     }
 
     /// Simple cubic circuit for testing: computes x^3 + x + 5
-    #[derive(Debug, Default)]
+    #[derive(Default, Derivative)]
+    #[derivative(Debug)]
     struct CubicCircuit<F: Field> {
+        #[derivative(Debug="ignore")]
         _phantom: PhantomData<F>,
     }
 

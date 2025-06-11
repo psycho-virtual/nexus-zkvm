@@ -144,22 +144,22 @@ impl<G: CurveGroup> CCSShape<G> {
         assert_eq!(U.X.len(), self.num_io);
 
         // Debug info
-        tracing::debug!("DEBUG is_satisfied_linearized: num_vars={}, W.W.len={}", self.num_vars, W.W.len());
-        tracing::debug!("DEBUG is_satisfied_linearized: num_io={}, U.X.len={}", self.num_io, U.X.len());
+        tracing::debug!("is_satisfied_linearized: num_vars={}, W.W.len={}", self.num_vars, W.W.len());
+        tracing::debug!("is_satisfied_linearized: num_io={}, U.X.len={}", self.num_io, U.X.len());
         
         let z = [U.X.as_slice(), W.W.as_slice()].concat();
-        tracing::debug!("DEBUG is_satisfied_linearized: z.len={}", z.len());
+        tracing::debug!("is_satisfied_linearized: z.len={}", z.len());
         
         let Mzs: Vec<G::ScalarField> = ark_std::cfg_iter!(&self.Ms)
             .map(|M| vec_to_mle(M.multiply_vec(&z).as_slice()).evaluate::<G>(U.rs.as_slice()))
             .collect();
         
-        tracing::debug!("DEBUG is_satisfied_linearized: Mzs.len={}, U.vs.len={}", Mzs.len(), U.vs.len());
+        tracing::debug!("is_satisfied_linearized: Mzs.len={}, U.vs.len={}", Mzs.len(), U.vs.len());
         
         // Detailed check for each value
         for idx in 0..self.num_matrices {
             if Mzs[idx] != U.vs[idx] {
-                tracing::debug!("DEBUG is_satisfied_linearized: Mismatch at idx={}, computed={:?}, vs={:?}", 
+                tracing::debug!("is_satisfied_linearized: Mismatch at idx={}, computed={:?}, vs={:?}", 
                          idx, Mzs[idx], U.vs[idx]);
                 return Err(Error::NotSatisfied);
             }
@@ -168,7 +168,7 @@ impl<G: CurveGroup> CCSShape<G> {
         // Check commitment
         let computed_commitment = W.commit::<C>(ck);
         if U.commitment_W != computed_commitment {
-            tracing::debug!("DEBUG is_satisfied_linearized: Commitment mismatch");
+            tracing::debug!("is_satisfied_linearized: Commitment mismatch");
             return Err(Error::NotSatisfied);
         }
 

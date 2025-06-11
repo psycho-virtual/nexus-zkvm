@@ -51,6 +51,8 @@ num_cpus = "1.16"
 anyhow = "1"
 tracing-test = "0.2.5"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+derivative = "2.2.0"
+tracing-flame = "0.2.0"
 
 [features]
 default = ["parallel"]

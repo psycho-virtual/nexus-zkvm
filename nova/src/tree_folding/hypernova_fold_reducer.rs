@@ -11,6 +11,8 @@ use crate::tree_folding::fold_reducer::FoldReducer;
 use ark_crypto_primitives::sponge::{Absorb, CryptographicSponge};
 use ark_ec::CurveGroup;
 use ark_ff::{PrimeField, ToConstraintField, Zero};
+use std::fmt::Debug;
+use tracing::instrument;
 
 /// Error type for HypernovaFoldReducer operations
 #[derive(Debug)]
@@ -32,6 +34,7 @@ impl From<CCSError> for HypernovaFoldError {
 /// The basic structure for HypernovaFoldReducer
 /// This implements the fold reducer trait for Hypernova's LCCS instances
 /// K is hardcoded to 2 for binary tree folding
+#[derive(Debug)]
 pub struct HypernovaFoldReducer<'a, G, C, SC, RO>
 where
     G: CurveGroup + AbsorbEmulatedFp<G::ScalarField>,
@@ -82,7 +85,7 @@ where
     G::BaseField: PrimeField + Absorb,
     G::ScalarField: PrimeField + Absorb,
     G::Affine: Absorb + ToConstraintField<G::BaseField>,
-    C: PolyCommitmentScheme<G>,
+    C: PolyCommitmentScheme<G> + Debug,
     SC: StepCircuit<G::ScalarField>,
     RO: CryptographicSponge,
 {
@@ -138,6 +141,7 @@ where
         }
     }
 
+    #[instrument(level = "debug", skip(self))]
     fn strict_to_acc(&self, strict: &Self::StrictInst) -> Result<Self::AccInst, Self::Error> {
         // Synthesize step circuit witness using precomputed parameters
         match synthesize_step_circuit_with_params::<G, C, _>(&self.params, strict, self.ck) {
@@ -171,47 +175,6 @@ where
     }
 }
 
-impl<'a, G, C, SC, RO> HypernovaFoldReducer<'a, G, C, SC, RO>
-where
-    G: CurveGroup + AbsorbEmulatedFp<G::ScalarField>,
-    G::BaseField: PrimeField + Absorb,
-    G::ScalarField: PrimeField + Absorb,
-    G::Affine: Absorb + ToConstraintField<G::BaseField>,
-    C: PolyCommitmentScheme<G>,
-    SC: StepCircuit<G::ScalarField>,
-    RO: CryptographicSponge,
-{
-    /// Create a CCS shape from the step circuit
-    /// This is a helper method that would ideally be stored or cached
-    fn create_shape_from_circuit(&self) -> Result<CCSShape<G>, HypernovaFoldError> {
-        // In practice, this would be done once and stored, or the shape would be
-        // passed to the reducer. For now, we'll create a dummy shape.
-        // This is a placeholder - in a real implementation, you'd synthesize
-        // the circuit once to get the shape and store it.
-
-        // Create a dummy input to synthesize the circuit and get the shape
-        let dummy_input = StepFunctionInput {
-            i: G::ScalarField::zero(),
-            z_i: vec![G::ScalarField::zero(); SC::ARITY],
-        };
-
-        let mut random_oracle = self.new_random_oracle();
-
-        match synthesize_and_linearize_step::<G, C, _, _>(
-            &self.params,
-            &dummy_input,
-            self.ck,
-            &mut random_oracle,
-        ) {
-            Ok(result) => Ok(result.ccs_shape),
-            Err(e) => Err(HypernovaFoldError::LinearizationFailed(format!(
-                "Failed to create CCS shape: {:?}",
-                e
-            ))),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,7 +186,6 @@ mod tests {
     use ark_r1cs_std::fields::{fp::FpVar, FieldVar};
     use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
     use ark_std::{marker::PhantomData, test_rng};
-    use tracing::{debug, info, info_span};
     use tracing_subscriber::{
         filter, fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt,
     };
@@ -242,7 +204,10 @@ mod tests {
     fn setup_test_tracing() -> tracing::subscriber::DefaultGuard {
         let filter = filter::Targets::new()
             .with_target(TEST_TARGET, tracing::Level::DEBUG)
-            .with_target("nexus_nova::tree_folding::hypernova_fold_reducer", tracing::Level::DEBUG)
+            .with_target(
+                "nexus_nova::tree_folding::hypernova_fold_reducer",
+                tracing::Level::DEBUG,
+            )
             .with_target("nexus_nova::tree_folding", tracing::Level::DEBUG)
             .with_target("tree_folding", tracing::Level::DEBUG)
             .with_target("hypernova_fold_reducer", tracing::Level::DEBUG);
@@ -251,7 +216,7 @@ mod tests {
             .with(
                 tracing_subscriber::fmt::layer()
                     .with_span_events(FmtSpan::ENTER | FmtSpan::CLOSE)
-                    .with_test_writer() // This ensures output goes to test stdout
+                    .with_test_writer(), // This ensures output goes to test stdout
             )
             .with(filter)
             .set_default()
@@ -348,8 +313,7 @@ mod tests {
 
         tracing::debug!("Input: i={}, z_i=[{}]", input.i, input.z_i[0]);
 
-        let span =
-            tracing::info_span!("strict_to_acc_conversion", input_i = %input.i, input_z = %input.z_i[0]);
+        let span = tracing::info_span!("strict_to_acc_conversion", input_i = %input.i, input_z = %input.z_i[0]);
         let _enter = span.enter();
 
         let (lccs_instance, witness) = reducer
@@ -404,8 +368,7 @@ mod tests {
 
         // Convert each strict instance to accumulator with timing
         let acc1 = {
-            let span =
-                tracing::info_span!("first_strict_to_acc", input_i = %input1.i, input_z = %input1.z_i[0]);
+            let span = tracing::info_span!("first_strict_to_acc", input_i = %input1.i, input_z = %input1.z_i[0]);
             let _enter = span.enter();
             reducer
                 .strict_to_acc(&input1)
@@ -413,8 +376,7 @@ mod tests {
         };
 
         let acc2 = {
-            let span =
-                tracing::info_span!("second_strict_to_acc", input_i = %input2.i, input_z = %input2.z_i[0]);
+            let span = tracing::info_span!("second_strict_to_acc", input_i = %input2.i, input_z = %input2.z_i[0]);
             let _enter = span.enter();
             reducer
                 .strict_to_acc(&input2)
