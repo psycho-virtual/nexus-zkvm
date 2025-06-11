@@ -10,6 +10,7 @@ use tracing::{debug, info, info_span};
 
 /// A circuit for sequential SHA-256 hash operations
 /// Each step takes the previous hash as input and produces a new hash
+#[derive(Debug)]
 pub struct SequentialSha256Circuit<F: PrimeField> {
     _phantom: PhantomData<F>,
 }

@@ -6,7 +6,7 @@ use crossbeam_deque::{Stealer, Worker as DequeWorker};
 use crossbeam_queue::ArrayQueue;
 
 use crate::fold_reducer::FoldReducer;
-use super::block_pool::{BlockPool, Payload};
+use super::block_pool::{BlockPool};
 use super::task::TaskHeap;
 use super::worker::{WorkerLocal, WorkerParams, READY_Q_CAP};
 
@@ -14,12 +14,12 @@ use super::worker::{WorkerLocal, WorkerParams, READY_Q_CAP};
 // Leaf producer thread
 // -----------------------------------------------------------------------------
 
-pub struct LeafProducer<L: Payload + Send + Sync + Clone + 'static> {
+pub struct LeafProducer<L: Send + Sync + Clone + 'static> {
     stream: Box<dyn Iterator<Item = L> + Send>,
     _heap_depth: usize, // k value for the binary heap (2^k leaf nodes)
 }
 
-impl<L: Payload + Send + Sync + Clone + 'static> LeafProducer<L> {
+impl<L: Send + Sync + Clone + 'static> LeafProducer<L> {
     pub fn new(stream: Box<dyn Iterator<Item = L> + Send>, heap_depth: usize) -> Self {
         Self { stream, _heap_depth: heap_depth }
     }
@@ -75,8 +75,8 @@ pub struct SchedulerParams<L, P, Proof, Error> {
 
 impl<L, P, Proof, Error> WorkerParams for SchedulerParams<L, P, Proof, Error>
 where
-    L: Payload + Send + Sync + Clone + 'static,
-    P: Payload + Send + Sync + 'static,
+    L: Send + Sync + Clone + 'static,
+    P: Send + Sync + 'static,
     Proof: Send + Sync + 'static,
     Error: Send + Sync + std::fmt::Debug + 'static,
 {
@@ -92,8 +92,8 @@ where
 
 pub struct Scheduler<L, P, Proof, Error>
 where
-    L: Payload + Send + Sync + Clone + 'static,
-    P: Payload + Send + Sync + 'static,
+    L: Send + Sync + Clone + 'static,
+    P: Send + Sync + 'static,
     Proof: Send + Sync + 'static,
     Error: Send + Sync + std::fmt::Debug + 'static,
 {
@@ -110,8 +110,8 @@ where
 
 impl<L, P, Proof, Error> Scheduler<L, P, Proof, Error>
 where
-    P: Payload + Send + Sync + 'static,
-    L: Payload + Send + Sync + Clone + 'static,
+    P: Send + Sync + 'static,
+    L: Send + Sync + Clone + 'static,
     Proof: Send + Sync + 'static,
     Error: Send + Sync + std::fmt::Debug + 'static,
 {
@@ -274,20 +274,6 @@ mod tests {
     // Dummy proof type for tests
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     struct DummyFoldProof;
-
-    impl Payload for LeafPayload {
-        fn encode_into(&self, dst: &mut [u8]) -> usize {
-            let bytes = self.0.to_le_bytes();
-            dst[..4].copy_from_slice(&bytes);
-            4
-        }
-
-        unsafe fn decode_from(src: &[u8]) -> Self {
-            let mut buf = [0u8; 4];
-            buf.copy_from_slice(&src[..4]);
-            LeafPayload(u32::from_le_bytes(buf))
-        }
-    }
 
     struct SimpleReducer;
 

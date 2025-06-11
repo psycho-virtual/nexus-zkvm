@@ -3,10 +3,9 @@ use std::fmt::{self, Debug, Formatter};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use super::block_pool::{BlockPool, Payload};
+use super::block_pool::{BlockPool, BufHandle};
 use super::task::{Task, TaskHeap};
 use crate::fold_reducer::FoldReducer;
-use crate::parallel_tree::BufHandle;
 
 // -----------------------------------------------------------------------------
 // Worker local state
@@ -54,10 +53,10 @@ impl std::error::Error for WorkerError {}
 /// Trait that defines the associated types for worker parameters
 pub trait WorkerParams {
     /// The type that represents leaf input data (must be a Payload)
-    type LeafInput: Payload + Send + Sync + Clone + 'static;
+    type LeafInput: Send + Sync + Clone + 'static;
 
     /// The type that represents internal node data (must be a Payload)
-    type Inner: Payload + Send + Sync + 'static;
+    type Inner: Send + Sync + 'static;
 
     /// The type that represents fold proofs
     type Proof: Send + Sync + 'static;
@@ -204,7 +203,7 @@ impl<P: WorkerParams> WorkerLocal<P> {
         let mut write_handle = self.pool.claim(buf_id)
             .ok_or(WorkerError::BufferClaimFailed(leaf_idx))?;
         
-        write_handle.write(&acc);
+        write_handle.write(acc);
         // Convert back to buf_id (this consumes write_handle but keeps buffer allocated)
         let final_buf_id = write_handle.into_id();
         assert_eq!(buf_id, final_buf_id); // Sanity check
@@ -381,7 +380,7 @@ impl<P: WorkerParams> WorkerLocal<P> {
         right_handle.release();
 
         // Write result to the reused buffer
-        result_handle.write(&parent_acc);
+        result_handle.write(parent_acc);
         let result_buf_id = result_handle.into_id();
 
         // First transition to PROCESSING state
@@ -543,20 +542,6 @@ mod tests {
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     struct LeafPayload(u32);
-
-    impl Payload for LeafPayload {
-        fn encode_into(&self, dst: &mut [u8]) -> usize {
-            let bytes = self.0.to_le_bytes();
-            dst[..4].copy_from_slice(&bytes);
-            4
-        }
-
-        unsafe fn decode_from(src: &[u8]) -> Self {
-            let mut buf = [0u8; 4];
-            buf.copy_from_slice(&src[..4]);
-            LeafPayload(u32::from_le_bytes(buf))
-        }
-    }
 
     struct SimpleReducer;
 
