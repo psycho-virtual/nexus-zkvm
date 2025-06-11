@@ -205,7 +205,7 @@ mod tests {
         let filter = filter::Targets::new()
             .with_target(TEST_TARGET, tracing::Level::DEBUG)
             .with_target(
-                "nexus_nova::tree_folding::hypernova_fold_reducer",
+                "nexus_nova::tree_folding::hypernova_fold_reducer::tests",
                 tracing::Level::DEBUG,
             )
             .with_target("nexus_nova::tree_folding", tracing::Level::DEBUG)

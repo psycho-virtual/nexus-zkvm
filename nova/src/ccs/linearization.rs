@@ -27,7 +27,7 @@ use ark_relations::r1cs::{ConstraintSystem, SynthesisError, SynthesisMode};
 use ark_spartan::polycommitments::PolyCommitmentScheme;
 use tracing::instrument;
 
-const LOG_TARGET: &str = "nexus-nova::ccs::linearization";
+const LOG_TARGET: &str = "nexus-nova::ccs::linearization::";
 
 /// Input structure for step function linearization
 #[derive(Debug, Clone)]
