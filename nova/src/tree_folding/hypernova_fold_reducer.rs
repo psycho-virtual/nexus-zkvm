@@ -1,10 +1,9 @@
 use crate::absorb::AbsorbEmulatedFp;
 use crate::ccs::lccs_fold::{prove_folding, LCCSFoldingProof};
 use crate::ccs::linearization::{
-    synthesize_and_linearize_step, synthesize_step_circuit_with_params, LinearizationParams,
-    StepFunctionInput,
+    synthesize_step_circuit_with_params, LinearizationParams, StepFunctionInput,
 };
-use crate::ccs::{CCSShape, CCSWitness, Error as CCSError, LCCSInstance};
+use crate::ccs::{CCSWitness, Error as CCSError, LCCSInstance};
 use crate::circuits::nova::StepCircuit;
 use crate::provider::zeromorph::PolyCommitmentScheme;
 use crate::tree_folding::fold_reducer::FoldReducer;

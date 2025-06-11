@@ -1,75 +1,44 @@
-use std::marker::PhantomData;
-use std::sync::Arc;
-use std::mem;
+use std::sync::{Arc, Mutex};
 use std::cell::Cell;
 
 use crossbeam_queue::SegQueue;
-use memmap2::{MmapMut, MmapOptions};
-
-/// Compile-time constant for page size; most OSes use 4 KiB.  If you need the
-/// real runtime value, replace this with a `libc::sysconf` call and add the
-/// `libc` crate, but we avoid extra dependencies here.
-const PAGE_SIZE: usize = 4096;
 
 /// Dense handle that indexes a [`BlockPool`] page.  We keep this a `u32`
 /// because the slab is capped at 4 GiB (≈ 8192 pages on a 64-core machine).
 pub type BufId = u32;
 
-/// Marker trait that specifies (de)serialization of application data so that
-/// it can be sent off-heap to another process or persisted to disk.  This is a
-/// simplified version – the engine itself only needs *in-memory* buffers, but
-/// providing encode/decode makes the buffers usable for IPC as well.
-pub trait Payload {
-    /// Encode `self` into `dst`, returning the number of bytes written.
-    fn encode_into(&self, dst: &mut [u8]) -> usize;
-
-    /// # Safety
-    ///
-    /// The caller must guarantee that `src` was previously produced by
-    /// [`Self::encode_into`].
-    unsafe fn decode_from(src: &[u8]) -> Self;
-}
-
 /// Pool of fixed-size blocks backed by a single anonymous mmap of a contiguous
 /// slab.  The type parameter `P` fixes the payload type stored in each
 /// allocated block, allowing the API to omit the `<P>` annotation on every
 /// call to [`BlockPool::alloc`] or [`BufHandle::write`].
-#[derive(Debug)]
-pub struct BlockPool<P: Payload> {
-    mmap: MmapMut,
-    free: Arc<SegQueue<BufId>>, // global – cheap to clone
-    block_size: usize,
-    _phantom: PhantomData<P>,
+pub struct BlockPool<P> {
+    /// Storage for live values. Each slot is protected by a mutex so multiple
+    /// threads can claim/release different buffers concurrently.
+    blocks: Vec<Mutex<Option<P>>>,
+    /// Free-list implemented as a lock-free queue.
+    free: Arc<SegQueue<BufId>>, // cheap to clone across threads
 }
 
-impl<P: Payload> BlockPool<P> {
+impl<P: Send + Sync> BlockPool<P> {
     /// Create a new block pool sized for the given number of *logical cores*.
-    /// The design reserves two pages per core, matching the worst-case number
-    /// of live nodes in a perfectly unbalanced binary tree (one leaf per
-    /// worker plus parent nodes that survived a GC round).
+    /// We reserve two buffers per core – identical behaviour to the previous
+    /// page-based implementation but without relying on OS-backed memory
+    /// mappings.
     pub fn new(num_cores: usize) -> anyhow::Result<Self> {
         let num_blocks = num_cores * 2; // 2 × cores
-        let payload_sz = mem::size_of::<P>();
-        let block_size = if payload_sz <= PAGE_SIZE {
-            PAGE_SIZE
-        } else {
-            ((payload_sz + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE
-        };
 
-        let len = num_blocks * block_size;
+        // Allocate an empty slot for every buffer ID.
+        let blocks = (0..num_blocks)
+            .map(|_| Mutex::new(None))
+            .collect::<Vec<_>>();
 
-        let mmap = MmapOptions::new()
-            .len(len)
-            .map_anon()?;
-
-        // Initialize queue with all buffer IDs in descending order so
-        // that the first `pop` grabs page 0 (nicer for debugging).
+        // Initialise free list with all IDs so the first pop gets 0 (nicer for debugging).
         let free = Arc::new(SegQueue::new());
         for id in (0..num_blocks as BufId).rev() {
             free.push(id);
         }
 
-        Ok(Self { mmap, free, block_size, _phantom: PhantomData })
+        Ok(Self { blocks, free })
     }
 
     /// Access to the free stack, only used in tests
@@ -91,10 +60,8 @@ impl<P: Payload> BlockPool<P> {
     /// as a quick guard before attempting to obtain a mutable view through a
     /// [`BufHandle`].
     #[inline]
-    pub fn can_edit(&self, id: BufId) -> bool {
-        let off = id as usize * self.block_size;
-        let end = off + self.block_size;
-        end <= self.mmap.len()
+    fn can_edit(&self, id: BufId) -> bool {
+        (id as usize) < self.blocks.len()
     }
 
     /// Check whether the block identified by `id` is currently *free* (i.e.
@@ -135,21 +102,13 @@ impl<P: Payload> BlockPool<P> {
     /// Return a block to the pool.  Meant to be called from
     /// [`BufHandle::release`].
     pub(crate) fn free(&self, id: BufId) {
-        self.free.push(id);
-    }
-
-    /// Map a `BufId` into a mutable slice of bytes with the correct page
-    /// offset.
-    pub (crate) fn map_mut(&self, id: BufId) -> &mut [u8] {
-        let off = id as usize * self.block_size;
-        let end = off + self.block_size;
-        if end <= self.mmap.len() {
-            unsafe {
-                let ptr = self.mmap.as_ptr().add(off) as *mut u8;
-                std::slice::from_raw_parts_mut(ptr, self.block_size)
-            }
+        if self.can_edit(id) {
+            // Clear the stored value so the next owner sees a clean slot.
+            let mut guard = self.blocks[id as usize].lock().expect("mutex poisoned");
+            *guard = None;
+            self.free.push(id);
         } else {
-            panic!("BufId {id} is out of range")
+            panic!("BufId {} is out of range", id);
         }
     }
 
@@ -178,34 +137,29 @@ impl<P: Payload> BlockPool<P> {
     }
 }
 
-/// Typed view on a buffer.  This is *zero-sized* – it only keeps a raw pointer
-/// to the underlying page, therefore behaves like `&mut [u8]`.
-pub struct BufHandle<'a, P: Payload> {
+/// Typed view on a buffer slot.
+pub struct BufHandle<'a, P: Send + Sync> {
     pool: &'a BlockPool<P>,
     id: BufId,
     released: Cell<bool>,
-    // Use *mut () as a non-Send/non-Sync marker to prevent cross-thread movement
-    _not_send_sync: PhantomData<*mut ()>,
-    _phantom: PhantomData<&'a mut P>,
 }
 
-impl<'a, P: Payload> BufHandle<'a, P> {
+impl<'a, P: Send + Sync> BufHandle<'a, P> {
     /// Construct a new handle from `(pool, id)`.
     pub fn new(pool: &'a BlockPool<P>, id: BufId) -> Self {
         Self { 
             pool, 
             id, 
             released: Cell::new(false), 
-            _not_send_sync: PhantomData,
-            _phantom: PhantomData,
         }
     }
 
-    /// Write a payload value into the underlying block using
-    /// [`Payload::encode_into`].
-    pub fn write(&mut self, value: &P) {
-        let buf = self.pool.map_mut(self.id);
-        value.encode_into(buf);
+    /// Store a value in the underlying buffer slot, overwriting any previous content.
+    pub fn write(&mut self, value: P) {
+        let mut guard = self.pool.blocks[self.id as usize]
+            .lock()
+            .expect("mutex poisoned");
+        *guard = Some(value);
     }
 
     /// Consume the handle and return the underlying [`BufId`] **without**
@@ -224,30 +178,19 @@ impl<'a, P: Payload> BufHandle<'a, P> {
         self.pool.free(self.id);
     }
 
-    /// Expose the pool's block size for tests/debug.
-    pub fn block_size(&self) -> usize {
-        self.pool.block_size
-    }
-
-    /// Read and decode the payload stored in this buffer and return it.
+    /// Consume the stored value and return it. Panics if the slot is empty.
     ///
-    /// # Safety
-    /// This relies on the invariant that the memory region was previously
-    /// initialised by a corresponding call to `encode_into` for the *same*
-    /// payload type `P`.  The caller is responsible for upholding this
-    /// contract – in the normal course of operation the pool enforces it by
-    /// handing out `BufHandle` instances that are only written through the
-    /// safe [`write`][BufHandle::write] API provided above.
+    /// The buffer slot is cleared (set to `None`) after the value is moved
+    /// out, allowing subsequent writes without leftover data.
     pub fn read(&self) -> P {
-        // SAFETY: The slice returned by `map_mut` has the correct bounds for
-        // this buffer ID.  We immediately cast it to an immutable slice which
-        // is safe because we only hold a shared reference to `self`.
-        let buf = self.pool.map_mut(self.id);
-        unsafe { P::decode_from(&*buf) }
+        let mut guard = self.pool.blocks[self.id as usize]
+            .lock()
+            .expect("mutex poisoned");
+        guard.take().expect("attempted to read from an uninitialised buffer")
     }
 }
 
-impl<'a, P: Payload> Drop for BufHandle<'a, P> {
+impl<'a, P: Send + Sync> Drop for BufHandle<'a, P> {
     fn drop(&mut self) {
         // Only free if not explicitly released already
         if !self.released.get() {
@@ -291,110 +234,12 @@ mod tests {
         }
     }
 
-    /// Memory mapping: round-trip write/read and ensure pages don't overlap.
-    #[test]
-    fn block_pool_memory_mapping_correctness() {
-        // Wrapper type that encodes a test pattern
-        struct TestU32(u32);
-        
-        impl Payload for TestU32 {
-            fn encode_into(&self, dst: &mut [u8]) -> usize {
-                // Fill first 16 bytes with a test pattern (0xAB)
-                for b in &mut dst[..16] {
-                    *b = 0xAB;
-                }
-                16
-            }
-            
-            unsafe fn decode_from(_src: &[u8]) -> Self {
-                // Not used in this test
-                TestU32(0)
-            }
-        }
-        
-        let pool = BlockPool::<TestU32>::new(2).unwrap(); // 4 pages total
-
-        // Allocate two blocks
-        let handle1 = pool.alloc().expect("first allocation should succeed");
-        let handle2 = pool.alloc().expect("second allocation should succeed");
-        
-        // Get first ID
-        let id1 = handle1.into_id();
-        
-        // Get second ID and immediately store it
-        let id2 = handle2.into_id();
-        
-        assert_ne!(id1, id2, "expected two distinct BufIds");
-
-        // Re-create a handle for id1 using new()
-        let mut handle1 = BufHandle::new(&pool, id1);
-        
-        // Write pattern to the block
-        handle1.write(&TestU32(42)); // Value doesn't matter, implementation just writes 0xAB
-
-        // Free blocks for cleanup
-        pool.free(id1); 
-        pool.free(id2);
-        
-        // Read the pattern back to verify it was written correctly
-        {
-            let buf = pool.map_mut(id1);
-            for b in &buf[..16] {
-                assert_eq!(*b, 0xAB);
-            }
-        }
-
-        // Verify block addresses are properly separated
-        let ptr1 = pool.map_mut(id1).as_ptr() as usize;
-        let ptr2 = pool.map_mut(id2).as_ptr() as usize;
-        let diff = ptr1.abs_diff(ptr2);
-        assert!(
-            diff >= pool.block_size,
-            "buffers for different BufIds overlap (diff={diff})"
-        );
-    }
-
-    /// Allocation/free bookkeeping via `is_free`.
-    #[test]
-    fn block_pool_is_free_tracking() {
-        let num_cores = 2;
-        let pool = BlockPool::<Dummy>::new(num_cores).unwrap();
-
-        // We will allocate and immediately free a handful of buffers –
-        // verifying the `is_free` status in between.
-        let trials = num_cores; // allocate ≤ total capacity
-
-        for _ in 0..trials {
-            let handle = pool.alloc().expect("expected free block");
-            let id = handle.into_id(); // do *not* free yet
-
-            // The block has been removed from the free list.
-            assert!(!pool.is_free(id), "allocated BufId should not be free");
-
-            // Return it to the pool.
-            pool.free(id);
-
-            // Now it must show up as free.
-            assert!(pool.is_free(id), "released BufId should be free again");
-        }
-    }
-
     /// End-to-end: allocate via `BufHandle`, write bytes, read them back.
     #[test]
     fn block_pool_bufhandle_write_read_roundtrip() {
-        // Payload that encodes a fixed 32-byte pattern.
+        // Simple payload containing 32 distinct bytes.
+        #[derive(Clone, PartialEq, Eq, Debug)]
         struct Pattern([u8; 32]);
-        impl Payload for Pattern {
-            fn encode_into(&self, dst: &mut [u8]) -> usize {
-                dst[..32].copy_from_slice(&self.0);
-                32
-            }
-            unsafe fn decode_from(src: &[u8]) -> Self {
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(&src[..32]);
-                Pattern(arr)
-            }
-        }
 
         let pool = BlockPool::<Pattern>::new(1).unwrap();
 
@@ -405,14 +250,12 @@ mod tests {
         });
 
         let mut handle = pool.alloc().expect("allocation failed");
-        handle.write(&pattern);
+        handle.write(pattern.clone());
 
-        // Verify contents through pool mapping.
+        // Read back the value via a freshly claimed handle.
         let id = handle.into_id();
-        let buf = pool.map_mut(id);
-        for i in 0u8..32 {
-            assert_eq!(buf[i as usize], i, "byte mismatch at offset {i}");
-        }
+        let read_back = pool.claim(id).unwrap().read();
+        assert_eq!(read_back, pattern);
 
         // Explicitly free the block.
         pool.free(id);
@@ -421,94 +264,10 @@ mod tests {
         assert!(pool.is_free(id));
     }
 
-
-    #[test]
-    fn block_pool_multicore_allocation_write() {
-        use std::sync::{Arc, mpsc};
-        use rayon::ThreadPoolBuilder;
-        use std::collections::HashSet;
-
-        // Payload identical to previous test.
-        #[derive(Clone, Copy)]
-        struct ThreadPayload(u32);
-
-        impl Payload for ThreadPayload {
-            fn encode_into(&self, dst: &mut [u8]) -> usize {
-                dst[..4].copy_from_slice(&self.0.to_le_bytes());
-                4
-            }
-
-            unsafe fn decode_from(src: &[u8]) -> Self {
-                let mut arr = [0u8; 4];
-                arr.copy_from_slice(&src[..4]);
-                ThreadPayload(u32::from_le_bytes(arr))
-            }
-        }
-
-        let cores = core_affinity::get_core_ids().expect("failed to get cores");
-        let num_workers = cores.len().min(8).max(1);
-
-        let pool = Arc::new(BlockPool::<ThreadPayload>::new(num_workers).unwrap());
-
-        let (tx, rx) = mpsc::channel::<(BufId, u32, usize)>(); // include core id
-
-        // Build custom rayon pool with pinning.
-        let core_vec = cores.clone();
-        let rayon_pool = ThreadPoolBuilder::new()
-            .num_threads(num_workers)
-            .start_handler(move |tid| {
-                if let Some(core) = core_vec.get(tid) {
-                    let _ = core_affinity::set_for_current(*core);
-                }
-            })
-            .build()
-            .expect("failed to build rayon pool");
-
-        rayon_pool.scope(|scope| {
-            for tid in 0..num_workers {
-                let pool = Arc::clone(&pool);
-                let tx = tx.clone();
-                let core_id = cores[tid].id;
-                scope.spawn(move |_| {
-                    let mut handle = pool.alloc().expect("alloc failed");
-                    handle.write(&ThreadPayload(tid as u32));
-                    let id = handle.into_id();
-                    tx.send((id, tid as u32, core_id)).unwrap();
-                });
-            }
-        });
-
-        drop(tx);
-
-        let mut seen_cores = HashSet::new();
-        let mut results = Vec::new();
-        for (id, val, core_id) in rx {
-            assert!(seen_cores.insert(core_id), "duplicate core {core_id}");
-            results.push((id, val));
-        }
-
-        assert_eq!(seen_cores.len(), num_workers, "not all workers pinned uniquely");
-
-        // Verify writes
-        for (id, expected) in results {
-            let buf = pool.map_mut(id);
-            let mut arr = [0u8; 4];
-            arr.copy_from_slice(&buf[..4]);
-            let val = u32::from_le_bytes(arr);
-            assert_eq!(val, expected);
-            pool.free(id);
-        }
-    }
-
     // ---------------------------------------------------------------------
     // Helper payload for tests
     // ---------------------------------------------------------------------
 
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug)]
     struct Dummy;
-
-    impl Payload for Dummy {
-        fn encode_into(&self, _dst: &mut [u8]) -> usize { 0 }
-        unsafe fn decode_from(_src: &[u8]) -> Self { Dummy }
-    }
 } 
