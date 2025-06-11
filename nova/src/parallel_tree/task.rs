@@ -403,6 +403,81 @@ impl TaskHeap {
             }
         }
     }
+
+    /// Get the level of a node at the given index in the binary heap.
+    /// Level 0 is the root, level increases as we go down the tree.
+    /// Returns None if the index is out of bounds.
+    #[inline]
+    pub fn level(&self, idx: usize) -> Option<usize> {
+        if idx >= self.size {
+            return None;
+        }
+        // For a 0-indexed complete binary tree, level = floor(log2(idx + 1))
+        Some((idx + 1).ilog2() as usize)
+    }
+
+    /// Get the column (position within the level) of a node at the given index.
+    /// Column 0 is the leftmost position at each level.
+    /// Returns None if the index is out of bounds.
+    #[inline]
+    pub fn col(&self, idx: usize) -> Option<usize> {
+        if idx >= self.size {
+            return None;
+        }
+        let level = (idx + 1).ilog2() as usize;
+        // Column = idx - (2^level - 1)
+        let level_start = (1 << level) - 1; // 2^level - 1
+        Some(idx - level_start)
+    }
+}
+
+#[cfg(test)]
+mod heap_tests {
+    use super::*;
+
+    #[test]
+    fn test_level_and_col_calculations() {
+        let heap = TaskHeap::new(2); // 4 leaves, 7 total nodes
+        
+        // Test root node
+        assert_eq!(heap.level(0), Some(0));
+        assert_eq!(heap.col(0), Some(0));
+        
+        // Test level 1 nodes
+        assert_eq!(heap.level(1), Some(1));
+        assert_eq!(heap.col(1), Some(0));
+        assert_eq!(heap.level(2), Some(1));
+        assert_eq!(heap.col(2), Some(1));
+        
+        // Test level 2 nodes (leaves)
+        assert_eq!(heap.level(3), Some(2));
+        assert_eq!(heap.col(3), Some(0));
+        assert_eq!(heap.level(4), Some(2));
+        assert_eq!(heap.col(4), Some(1));
+        assert_eq!(heap.level(5), Some(2));
+        assert_eq!(heap.col(5), Some(2));
+        assert_eq!(heap.level(6), Some(2));
+        assert_eq!(heap.col(6), Some(3));
+        
+        // Test out of bounds
+        assert_eq!(heap.level(7), None);
+        assert_eq!(heap.col(7), None);
+    }
+
+    #[test]
+    fn test_larger_heap_structure() {
+        let heap = TaskHeap::new(3); // 8 leaves, 15 total nodes
+        
+        // Test some nodes at different levels
+        assert_eq!(heap.level(0), Some(0)); // root
+        assert_eq!(heap.level(7), Some(3)); // first leaf
+        assert_eq!(heap.level(14), Some(3)); // last leaf
+        assert_eq!(heap.col(14), Some(7)); // last column at level 3
+        
+        // Test out of bounds
+        assert_eq!(heap.level(15), None);
+        assert_eq!(heap.col(15), None);
+    }
 }
 
 impl Debug for TaskHeap {

@@ -58,11 +58,9 @@ impl<P: Payload> BlockPool<P> {
 
         let len = num_blocks * block_size;
 
-        let mmap = unsafe {
-            MmapOptions::new()
-                .len(len)
-                .map_anon()?
-        };
+        let mmap = MmapOptions::new()
+            .len(len)
+            .map_anon()?;
 
         // Initialize queue with all buffer IDs in descending order so
         // that the first `pop` grabs page 0 (nicer for debugging).
@@ -308,7 +306,7 @@ mod tests {
                 16
             }
             
-            unsafe fn decode_from(src: &[u8]) -> Self {
+            unsafe fn decode_from(_src: &[u8]) -> Self {
                 // Not used in this test
                 TestU32(0)
             }
@@ -317,8 +315,8 @@ mod tests {
         let pool = BlockPool::<TestU32>::new(2).unwrap(); // 4 pages total
 
         // Allocate two blocks
-        let mut handle1 = pool.alloc().expect("first allocation should succeed");
-        let mut handle2 = pool.alloc().expect("second allocation should succeed");
+        let handle1 = pool.alloc().expect("first allocation should succeed");
+        let handle2 = pool.alloc().expect("second allocation should succeed");
         
         // Get first ID
         let id1 = handle1.into_id();
