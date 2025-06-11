@@ -13,9 +13,6 @@ use ark_ff::{PrimeField, ToConstraintField, Zero};
 use std::fmt::Debug;
 use tracing::instrument;
 
-/// Tracing target for HypernovaFoldReducer operations
-const HYPERNOVA_FOLD_REDUCER: &str = "nexus_nova::tree_folding::hypernova_fold_reducer";
-
 /// Error type for HypernovaFoldReducer operations
 #[derive(Debug)]
 pub enum HypernovaFoldError {
@@ -201,7 +198,7 @@ mod tests {
     type ROConfig = <RO as CryptographicSponge>::Config;
     type PCKey = <Z as PolyCommitmentScheme<G1>>::PolyCommitmentKey;
 
-    const TEST_TARGET: &str = "nexus_nova";
+    const TEST_TARGET: &str = "nexus-nova";
 
     // SRS degree constants for different test scenarios
     const SMALL_SRS_DEGREE: usize = 10; // 2^10 = 1,024 coefficients (for simple circuits like cubic)
