@@ -18,6 +18,7 @@ where
     R::AccInst: core::fmt::Debug,
 {
     // Compile-time assertion that K must be at least 2
+    #[allow(dead_code)]
     const ENSURE_K_GREATER_THAN_ONE: () = assert!(K > 1, "K must be at least 2");
 
     /// Create a new `FoldDriver` with the supplied reducer.

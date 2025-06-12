@@ -117,7 +117,7 @@ where
         }
     }
 
-    fn verify_step(&self, parent: &Self::AccInst, proof: &Self::FoldProof) -> bool {
+    fn verify_step(&self, parent: &Self::AccInst, _proof: &Self::FoldProof) -> bool {
         // For a stateless verification, we would need the children instances to be passed
         // as parameters. Since the current FoldReducer trait doesn't support this,
         // we'll implement a basic verification that checks if the proof is valid

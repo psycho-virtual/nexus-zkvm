@@ -95,9 +95,11 @@ where
 
             // Create dummy variables for shape compilation
             let dummy_i = FpVar::new_witness(shape_cs.clone(), || Ok(G::ScalarField::ZERO))?;
-            let dummy_z: Vec<FpVar<G::ScalarField>> = (0..SC::ARITY)
-                .map(|i| FpVar::new_witness(shape_cs.clone(), || Ok(G::ScalarField::ZERO)))
-                .collect::<Result<Vec<_>, _>>()?;
+            let dummy_z: Vec<FpVar<G::ScalarField>> = std::iter::repeat_with(|| 
+                FpVar::new_witness(shape_cs.clone(), || Ok(G::ScalarField::ZERO))
+            )
+            .take(SC::ARITY)
+            .collect::<Result<Vec<_>, _>>()?;
 
             tracing::debug!(
                 "Constraint system setup completed with {} dummy variables",
@@ -327,7 +329,7 @@ where
     })?;
 
     // Step 2: Sample challenges from random oracle
-    let (gamma, beta, s) = tracing::debug_span!(target: LOG_TARGET, "challenge_sampling").in_scope(|| {
+    let (gamma, beta, _s) = tracing::debug_span!(target: LOG_TARGET, "challenge_sampling").in_scope(|| {
         // Sample γ ← F
         let gamma: G::ScalarField = random_oracle.squeeze_field_elements(1)[0];
         // Sample β ← F^s
