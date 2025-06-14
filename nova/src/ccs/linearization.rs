@@ -341,7 +341,7 @@ where
     })?;
 
     // Step 2: Sample challenges from random oracle
-    let (gamma, beta, _s) = tracing::debug_span!(target: LOG_TARGET, "challenge_sampling").in_scope(|| {
+    let (gamma, beta, s) = tracing::debug_span!(target: LOG_TARGET, "challenge_sampling").in_scope(|| {
         // Sample γ ← F
         let gamma: G::ScalarField = random_oracle.squeeze_field_elements(1)[0];
         // Sample β ← F^s
@@ -575,7 +575,7 @@ where
         })?;
 
         // Step 2: Reconstruct the polynomial and verify sumcheck
-        let (polynomial_info, r_x) = tracing::debug_span!(target: LOG_TARGET, "sumcheck_verification").in_scope(|| {
+        let (_polynomial_info, r_x) = tracing::debug_span!(target: LOG_TARGET, "sumcheck_verification").in_scope(|| {
             // Reconstruct the witness vector z = (X || W)
             let z = [instance.X.as_slice(), witness.W.as_slice()].concat();
 
