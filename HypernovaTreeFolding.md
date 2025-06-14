@@ -326,7 +326,7 @@ The augmented circuit encapsulates:
 
 ## FoldInnerLCCS Algorithm
 
-**Purpose:** Folds two inner-node LCCS proofs into one, and fabricates the "augmented-circuit" instance that will be fed to the next-higher Nova layer. The inner node computation would also ensure that the Mangrove partial permuations of the leaves are multiplied correctly as well as merging the hashes of the public values/permutation constraints and the witnesses. This routine is used when both children of the recursion tree are themselves linearised CCS nodes (no raw CCS leaves remain).
+**Purpose:** Folds two inner-node LCCS proofs into one, and fabricates the "augmented-circuit" instance that will be fed to the next-higher HyperNova layer. The inner node computation would also ensure that the Mangrove partial permuations of the leaves are multiplied correctly as well as merging the hashes of the public values/permutation constraints and the witnesses. This routine is used when both children of the recursion tree are themselves linearised CCS nodes (no raw CCS leaves remain).
 
 ### Function Signature
 
@@ -336,7 +336,10 @@ FoldInnerLCCS(
     (U_1, W_1),                 // first child LCCS instance & witness
     (U_2, W_2),                 // second child LCCS instance & witness
     (u_1, w_1),                 // first child synthesized witness from previous round
-    (u_2, w_2)                  // second child synthesized witness from previous round
+    (u_2, w_2),                 // second child synthesized witness from previous round
+    (U_secondary, W_secondary)  // Secondary circuit accumulator & witness
+    pp_secondary,               // Pedersen commitment parameters on G₂
+    shape_secondary,            // R1CS constraint shape for secondary circuit
 ) -> (
     U_F, W_F,                   // folded LCCS instance & witness
     u_aug, w_aug                // augmented circuit (instance, witness)
@@ -373,7 +376,45 @@ where `i ∈ {1, 2}` and:
 - `v_{i,j}`: Folded linear values from previous round
 - `w_i`: Private witness containing all auxiliary data from previous folding operations
 
-### Step 2: Sum-Check that Both Inputs Were Valid
+**Secondary circuit accumulator and parameters:**
+```
+U_secondary: RelaxedR1CSInstance<G2, C2> = {
+    commitment_W: C2::Commitment,     // ∈ G₂ (Pedersen commitment to witness)
+    commitment_E: C2::Commitment,     // ∈ G₂ (Pedersen commitment to error vector)  
+    X: Vec<G2::ScalarField>          // ∈ 𝔽₂^{11} (public inputs for elliptic curve ops)
+}
+
+W_secondary: RelaxedR1CSWitness<G2> = {
+    W: Vec<G2::ScalarField>,         // ∈ 𝔽₂^{num_vars} (private witness)
+    <!-- E: Vec<G2::ScalarField>          // ∈ 𝔽₂^{num_constraints} (error vector for relaxation) -->
+}
+
+pp_secondary: C2::PP                 // Pedersen commitment parameters on curve G₂
+shape_secondary: R1CSShape<G2>       // R1CS constraint matrices (A, B, C) for 11-IO circuit
+```
+
+Where:
+- **G₂**: Secondary elliptic curve with G₂::ScalarField = G₁::BaseField = 𝔽₂
+- **C2**: Pedersen commitment scheme operating on G₂  
+- **11-IO circuit**: Enforces elliptic curve addition `g_out = g₁ + r·g₂` with public inputs `[1, g₁.x, g₁.y, g₁.z, g₂.x, g₂.y, g₂.z, g_out.x, g_out.y, g_out.z, r]`
+
+
+If `(U_secondary, W_secondary)` is not available for some reason, they can be set to null values. Specifically, the following:
+
+```
+U_secondary_null: RelaxedR1CSInstance<G2, C2> = {
+    commitment_W: C2::Commitment::zero(),     // Identity element on G₂ (point at infinity)
+    commitment_E: C2::Commitment::zero(),     // Identity element on G₂ (point at infinity)
+    X: vec![G2::ScalarField::zero(); 11]     // Vector of 11 zero elements in 𝔽₂
+}
+
+W_secondary_null: RelaxedR1CSWitness<G2> = {
+    W: vec![G2::ScalarField::zero(); num_vars]  // Vector of zeros with length num_vars
+}
+```
+
+
+### Step 2: Sumcheck and Linearization
 
 #### 2.1 Polynomial to Collapse the Two Siblings
 
@@ -407,16 +448,40 @@ Verifier challenges through the random oracle produce `r'ₓ ∈ F^s` and the cl
 *Note: Because the degree per variable is ≤ d+1, soundness error is (d+1)s/|F|.*
 
 
-### Step 3: Folding Step (Homomorphic Combination)
+### Step 3: Folding in the Primary and Secondary Circuit  (Homomorphic Combination)
 
 **Sample folding challenge:**
 ```
 ρ ← R("fold-ρ" ∥ C1 | C2 | C1 | C2 ∥ r'ₓ) ∈ F
 ```
 
-**Fold LCCS commitments and witnesses:**
+**Compute random linear combinations of the LCCS commitments in the Seconary Circuit**
+
+The Secondary circuit would compute the following:
 ```
 C_F := C_L + ρ · C_R + p^2 · C_l  + p^3 · C_r
+```
+where the public parameters of the circuit is ρ, C_L, C_R, C_l, C_r
+
+Then, we generate the a new secondary witness, w_{synth_secondary}, that satisfies this secondary circuit with the given inputs
+
+**Folding within Nova**
+Then, compute T and Comm(T)
+```
+T = A·w_secondary ∘ B·w_synth_secondary  +  A·w_secondary ∘ B·w_synth_secondary  –  u₁·C·w_synth_secondary  –  u₂·C·w_secondary
+```
+
+Sample ρ' using Comm(T):
+p' <- RO(Comm(T))
+
+Then, construct fold the elements:
+
+W_secondary' = W_secondary + ρ' * w_secondary
+Comm(T_secondary') = Comm(T_secondary) + ρ' * Comm(T_secondary)
+Comm(W_secondary') = Comm(W_secondary) + ρ' * Comm(w_secondary)
+x_secondary' = X_secondary + p' * x_secondary
+
+```
 x_F := x_1 + ρ · x_2 + ρ^2 · x_{synth,1} + ρ^3 · x_{synth,2}
 r_{x,F} := r_{x,1} + ρ · r_{x,2} + ρ^2 · r_1 + ρ^3 · r_2
 v_{j,F} := v_{j,1} + ρ · v_{j,2} + ρ^2 · v_{synth,1,j} + ρ^3 · v_{synth,2,j}  (for j = 1…t)
@@ -430,7 +495,7 @@ U_F := (C_F, 1, x_F, r_{x,F}, v_{1,F}, …, v_{t,F})
 
 *Note: Multiple MSMs are needed to update both the LCCS and synthesized commitments.*
 
-### Step 4: Augmented R1CS Circuit
+### Step 4: Augmented Circuit Computations within Primary Circuit
 
 The step-circuit `FoldVerifier(vk_NIFS, U_L, U_R, u_l, u_r, ρ, π_SC)` is embedded into Nova's next layer. It contains four verification blocks:
 
@@ -445,19 +510,29 @@ h_w,parent = Poseidon_Hash(h_w,1 || h_w,2 || ... || h_w,k)  // Witness hash aggr
 h_plk,parent = Poseidon_Hash(h_plk,1 || h_plk,2 || ... || h_plk,k) // Parameter hash aggregation
 ```
 
-#### 4.3 Folding Challenge Computation
-Recompute C_F, x_F, r_{x,F}, v_{j,F} and assert they equal the public outputs in U_{F}:
-- **C_F** = C_L + ρ·C_R + ρ²·C_l + ρ⁴·C_r (folded commitment)
+### 4.3 Recompute the verifier challenge for folding the secondary circuit
+```
+ρ ← R("fold-ρ" ∥ π_SC ∥ r'ₓ ∥ C_1 ∥ C_2 ∥ x_1 ∥ x_2)
+p' <- RO(Comm(T))
+```
+This ensures that the folding challenge ρ incorporates both the sumcheck transcript and the synthesized witness commitments.
+
+
+#### 4.4 LCCS field-arithmetic Folding Challenge Computation
+Recompute x_F, r_{x,F}, v_{j,F} and assert they equal the public outputs in U_{F}
 - **x_F** = x_1 + ρ·x_2 + ρ²·x_{synth,1} + ρ⁴·x_{synth,2} (folded public input)
 - **r_{x,F}** = r_{x,1} + ρ·r_{x,2} + ρ²·r_1 + ρ⁴·r_2 (folded evaluation point)
 - **v_{j,F}** = v_{j,1} + ρ·v_{j,2} + ρ²·v_{synth,1,j} + ρ⁴·v_{synth,2,j} ∀j∈[1..t] (folded linear values)
 
 *Note: These homomorphic combinations require multiple multi-scalar multiplications (MSMs) to update both the LCCS commitments and synthesized witness commitments.*
 
-```
-ρ ← R("fold-ρ" ∥ π_SC ∥ r'ₓ ∥ C_1 ∥ C_2 ∥ x_1 ∥ x_2)
-```
-This ensures that the folding challenge ρ incorporates both the sumcheck transcript and the synthesized witness commitments.
+#### 4.5 Compute Nova Folding Verifier Logic
+Recompute the following in circuit:
+
+W_secondary' = W_secondary + ρ' * w_secondary
+Comm(T_secondary') = Comm(T_secondary) + ρ' * Comm(T_secondary)
+Comm(W_secondary') = Comm(W_secondary) + ρ' * Comm(w_secondary)
+
 
 The circuit outputs `accept = 1`.
 

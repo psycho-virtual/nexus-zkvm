@@ -10,6 +10,7 @@ use tracing::{debug, info, info_span};
 
 /// A circuit for sequential SHA-256 hash operations
 /// Each step takes the previous hash as input and produces a new hash
+#[derive(Debug)]
 pub struct SequentialSha256Circuit<F: PrimeField> {
     _phantom: PhantomData<F>,
 }
@@ -146,19 +147,12 @@ mod tests {
         filter, fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt,
     };
 
-    const TEST_TARGET: &str = "sequential_sha256";
+    const TEST_TARGET: &str = "nexus-nova";
 
     // Helper function to set up tracing for tests
     fn setup_test_tracing() -> tracing::subscriber::DefaultGuard {
         let filter = filter::Targets::new()
-            .with_target(TEST_TARGET, tracing::Level::DEBUG)
-            .with_target(
-                "nexus_nova::tree_folding::circuit::sequential_sha256",
-                tracing::Level::DEBUG,
-            )
-            .with_target("nexus_nova::tree_folding::circuit", tracing::Level::DEBUG)
-            .with_target("tree_folding", tracing::Level::DEBUG)
-            .with_target("sequential_sha256", tracing::Level::DEBUG);
+            .with_target(TEST_TARGET, tracing::Level::DEBUG);
 
         tracing_subscriber::registry()
             .with(

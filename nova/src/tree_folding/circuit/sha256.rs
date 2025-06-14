@@ -5,6 +5,7 @@ use ark_r1cs_std::{
     prelude::*,
 };
 use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
+use tracing::instrument;
 use std::marker::PhantomData;
 
 // Import the StepCircuit trait
@@ -17,6 +18,7 @@ use ark_crypto_primitives::crh::{
 };
 
 /// Define a SHA-256 circuit using arkworks crypto-primitives
+#[derive(Debug)]
 pub struct Sha256Circuit<F: PrimeField> {
     pub message: Vec<u8>,
     _phantom: PhantomData<F>,
@@ -35,6 +37,7 @@ impl<F: PrimeField> StepCircuit<F> for Sha256Circuit<F> {
     // Set ARITY to 1 (one input state variable)
     const ARITY: usize = 1;
 
+    #[instrument(level = "debug")]
     fn generate_constraints(
         &self,
         cs: ConstraintSystemRef<F>,
@@ -80,6 +83,7 @@ impl<F: PrimeField> StepCircuit<F> for Sha256Circuit<F> {
 }
 
 /// Helper function to calculate the SHA-256 hash using the native implementation
+#[instrument(level = "debug")]
 pub fn calculate_sha256_native(message: &[u8]) -> Vec<u8> {
     use sha2::{Digest, Sha256 as NativeSha256};
 
@@ -102,7 +106,6 @@ pub fn calculate_sha256_arkworks(message: &[u8]) -> Result<Vec<u8>, Box<dyn std:
 /// Utility for converting between bytes and field elements
 pub mod conversions {
     use super::*;
-    use ark_serialize::CanonicalSerialize;
 
     /// Convert a field element to bytes (for SHA-256 hashes)
     pub fn field_to_bytes<F: PrimeField>(field_val: &F) -> Vec<u8> {

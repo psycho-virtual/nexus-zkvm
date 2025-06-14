@@ -3,10 +3,9 @@
 use ark_crypto_primitives::sponge::{Absorb, CryptographicSponge, FieldElementSize};
 use ark_ec::CurveGroup;
 use ark_ff::{Field, PrimeField};
-use ark_poly::Polynomial;
 use ark_spartan::{dense_mlpoly::EqPolynomial, polycommitments::PolyCommitmentScheme};
 use ark_std::{rc::Rc, vec::Vec};
-use tracing;
+use tracing::{self, instrument};
 
 use super::{mle::vec_to_ark_mle, CCSShape, CCSWitness, Error, LCCSInstance};
 use crate::absorb::AbsorbEmulatedFp;
@@ -246,6 +245,7 @@ where
 
 /// Verify a folded LCCS instance without the sum-check proof
 /// This is useful for testing or when you already have the sigmas
+#[instrument(skip_all, name = "verify_folded_instance")]
 pub fn verify_folded_instance<G, C>(
     shape: &CCSShape<G>, // Rename from _shape to shape
     folded_lccs: &LCCSInstance<G, C>,
@@ -264,8 +264,6 @@ where
     G::ScalarField: Field,
     C: PolyCommitmentScheme<G>,
 {
-    tracing::debug!("DEBUG: Verifying folded instance...");
-
     // In the multi-folding protocol, we use:
     // 1. Commitment folding: C' = ρ·C₁ + ρ²·C₂
     // 2. Witness folding: W' = ρ·W₁ + ρ²·W₂
@@ -276,81 +274,82 @@ where
     let expected_commitment =
         lccs1.commitment_W.clone() * *rho + lccs2.commitment_W.clone() * rho_squared;
     if folded_lccs.commitment_W != expected_commitment {
-        tracing::debug!("DEBUG: Commitment homomorphism check failed");
+        tracing::debug!("Commitment homomorphism check failed");
         return Ok(false);
     }
-    tracing::debug!("DEBUG: Commitment homomorphism check passed");
+    tracing::debug!("Commitment homomorphism check passed");
 
     // 2. Check u value: u' = ρ·u₁ + ρ²·u₂
     let expected_u = lccs1.X[0] * *rho + lccs2.X[0] * rho_squared;
     if folded_lccs.X[0] != expected_u {
-        tracing::debug!(target: LCCS_FOLD_TARGET, "DEBUG: u value check failed");
+        tracing::debug!(target: LCCS_FOLD_TARGET, "u value check failed");
         return Ok(false);
     }
-    tracing::debug!(target: LCCS_FOLD_TARGET, "DEBUG: u value check passed");
+    tracing::debug!(target: LCCS_FOLD_TARGET, "u value check passed");
 
     // 3. Check X values: x' = ρ·x₁ + ρ²·x₂
     for i in 1..folded_lccs.X.len() {
         let expected_x = lccs1.X[i] * *rho + lccs2.X[i] * rho_squared;
         if folded_lccs.X[i] != expected_x {
-            tracing::debug!(target: LCCS_FOLD_TARGET, "DEBUG: X value check failed at index {}", i);
+            tracing::debug!(target: LCCS_FOLD_TARGET, "X value check failed at index {}", i);
             return Ok(false);
         }
     }
-    tracing::debug!(target: LCCS_FOLD_TARGET, "DEBUG: X values check passed");
+    tracing::debug!(target: LCCS_FOLD_TARGET, "X values check passed");
 
     // Skip vs value check from sigmas - we'll compute them directly from z instead
-    tracing::debug!(target: LCCS_FOLD_TARGET, "DEBUG: Skipping sigma-based vs check and validating with is_satisfied_linearized instead");
+    tracing::debug!(target: LCCS_FOLD_TARGET, "Skipping sigma-based vs check and validating with is_satisfied_linearized instead");
 
     // 5. Check evaluation point consistency - the folded instance should use the merged evaluation point
     if folded_lccs.rs.len() != lccs1.rs.len() {
-        tracing::debug!(target: LCCS_FOLD_TARGET, "DEBUG: evaluation point length mismatch. Expected: {}, Got: {}", lccs1.rs.len(), folded_lccs.rs.len());
+        tracing::debug!(target: LCCS_FOLD_TARGET, "evaluation point length mismatch. Expected: {}, Got: {}", lccs1.rs.len(), folded_lccs.rs.len());
         return Ok(false);
     }
-    tracing::debug!(target: LCCS_FOLD_TARGET, "DEBUG: evaluation point length check passed");
+    tracing::debug!(target: LCCS_FOLD_TARGET, "evaluation point length check passed");
 
     // 6. Verify witness folding consistency
     // folded_witness should be computed as: rho·W₁ + ρ²·W₂
     let expected_witness = match _witness1.fold(_witness2, rho) {
         Ok(w) => w,
         Err(_) => {
-            tracing::debug!(target: LCCS_FOLD_TARGET, "DEBUG: witness folding operation failed");
+            tracing::debug!(target: LCCS_FOLD_TARGET, "witness folding operation failed");
             return Ok(false);
         }
     };
 
     if folded_witness.W != expected_witness.W {
-        tracing::debug!(target: LCCS_FOLD_TARGET, "DEBUG: witness folding check failed");
+        tracing::debug!(target: LCCS_FOLD_TARGET, "witness folding check failed");
         return Ok(false);
     }
-    tracing::debug!(target: LCCS_FOLD_TARGET, "DEBUG: witness folding check passed");
+    tracing::debug!(target: LCCS_FOLD_TARGET, "witness folding check passed");
 
     // 7. Verify that the sigmas correctly represent the evaluations at the merged point
     // This is a crucial step to ensure the folding is valid
 
     // First, verify that sigmas1 and sigmas2 are of the expected length
     if sigmas1.len() != shape.num_matrices || sigmas2.len() != shape.num_matrices {
-        tracing::debug!(target: LCCS_FOLD_TARGET, "DEBUG: sigmas length check failed. Expected: {}, Got sigmas1: {}, sigmas2: {}", shape.num_matrices, sigmas1.len(), sigmas2.len());
+        tracing::debug!(target: LCCS_FOLD_TARGET, "sigmas length check failed. Expected: {}, Got sigmas1: {}, sigmas2: {}", shape.num_matrices, sigmas1.len(), sigmas2.len());
         return Ok(false);
     }
-    tracing::debug!(target: LCCS_FOLD_TARGET, "DEBUG: sigmas length check passed");
+    tracing::debug!(target: LCCS_FOLD_TARGET, "sigmas length check passed");
 
     // 8. Verify that the folded instance is satisfied by the CCS shape
     // This verifies the linearized CCS relation is satisfied
-    tracing::debug!(target: LCCS_FOLD_TARGET, "DEBUG: checking CCS relation satisfaction");
+    tracing::debug!(target: LCCS_FOLD_TARGET, "checking CCS relation satisfaction");
     match shape.is_satisfied_linearized::<C>(folded_lccs, folded_witness, ck) {
         Ok(_) => {
-            tracing::debug!(target: LCCS_FOLD_TARGET, "DEBUG: CCS relation check passed");
+            tracing::debug!(target: LCCS_FOLD_TARGET, "CCS relation check passed");
             Ok(true)
         }
         Err(e) => {
-            tracing::debug!(target: LCCS_FOLD_TARGET, "DEBUG: CCS relation check failed with error: {:?}", e);
+            tracing::debug!(target: LCCS_FOLD_TARGET, "CCS relation check failed with error: {:?}", e);
             Ok(false)
         }
     }
 }
 
 /// Generate a folding challenge using a cryptographic sponge
+#[instrument(skip_all, name = "generate_folding_challenge")]
 pub fn generate_folding_challenge<G, RO>(
     random_oracle: &mut RO,
     lccs1: &LCCSInstance<G, impl PolyCommitmentScheme<G>>,
@@ -381,6 +380,7 @@ where
 }
 
 /// Generate a complete sum-check-based proof for folding two LCCS instances
+#[instrument(skip_all, name = "prove_folding")]
 pub fn prove_folding<G, C, RO>(
     random_oracle: &mut RO,
     shape: &CCSShape<G>,
@@ -497,6 +497,7 @@ mod tests {
         zeromorph::Zeromorph,
     };
     use ark_crypto_primitives::sponge::poseidon::PoseidonSponge;
+    use ark_poly::Polynomial;
     use ark_std::{test_rng, One, UniformRand, Zero};
     use ark_test_curves::bls12_381::{Bls12_381 as E, Fr, G1Projective as G};
     use std::ops::Neg;

@@ -7,14 +7,16 @@
 // - scheduler: Task scheduling and orchestration
 
 pub mod block_pool;
+pub mod parallel_tree_folder;
+pub mod scheduler;
+pub mod sha256_chain_folder;
 pub mod task;
 pub mod worker;
-pub mod scheduler;
 
 // Re-export the public API so that downstream crates can simply `use
 // crate::parallel_tree::{BlockPool, Task, Scheduler, ...};`
 
-pub use block_pool::{BlockPool, BufHandle, BufId, Payload};
-pub use task::{Task, TaskHeap, LeafTask, NodeTask, leaf_state, node_state};
-pub use worker::{WorkerLocal, READY_Q_CAP, DummyStrictInst, DummyAccInst, DummyFoldProof};
-pub use scheduler::{Scheduler, LeafProducer}; 
+pub use block_pool::{BlockPool, BufHandle, BufId};
+pub use scheduler::{LeafProducer, Scheduler};
+pub use task::{leaf_state, node_state, LeafTask, NodeTask, Task, TaskHeap};
+pub use worker::{DummyAccInst, DummyFoldProof, DummyStrictInst, WorkerLocal, READY_Q_CAP};
