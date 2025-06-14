@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use std::fmt::Debug;
-use tracing::instrument;
 
 use super::block_pool::BlockPool;
 use super::scheduler::Scheduler;
@@ -112,7 +111,7 @@ where
         
         // Calculate depth: depth = log2(num_leaves)
         let depth = (num_leaves as f64).log2() as usize;
-        let pool_size = (self.num_workers * 4); // Ensure enough buffers
+        let pool_size = self.num_workers * 4; // Ensure enough buffers
         
         let span = tracing::info_span!(target: LOG_TARGET, "run", 
             depth = depth, 

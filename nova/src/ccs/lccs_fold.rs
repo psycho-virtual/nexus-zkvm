@@ -15,7 +15,7 @@ use crate::folding::hypernova::ml_sumcheck::{
 
 // Add error conversion from ml_sumcheck::Error to our Error type
 impl From<ml_sumcheck::Error> for Error {
-    fn from(err: ml_sumcheck::Error) -> Error {
+    fn from(_err: ml_sumcheck::Error) -> Error {
         // In a real implementation, you might want more granular conversion
         // For now, we'll map to InvalidEvaluationPoint
         Error::InvalidEvaluationPoint
@@ -116,7 +116,6 @@ pub fn construct_sumcheck_polynomial<G: CurveGroup>(
     // For each matrix M_j, add terms to the polynomial g(x)
     for j in 0..shape.num_matrices {
         // Calculate the weighting factor for this matrix
-        let t = shape.num_matrices;
         let gamma_j = gamma.pow([(j) as u64]);
 
         // Get matrix M_j
@@ -204,7 +203,7 @@ where
     //   random_oracle.absorb(&lccs2);
     //
     // This ensures that challenge generation is consistent between proving and verification.
-    
+
     // 1. Generate gamma challenge for polynomial weighting (same as prover)
     let gamma = generate_gamma_challenge::<G, RO>(random_oracle);
 
@@ -352,8 +351,8 @@ where
 #[instrument(skip_all, name = "generate_folding_challenge")]
 pub fn generate_folding_challenge<G, RO>(
     random_oracle: &mut RO,
-    lccs1: &LCCSInstance<G, impl PolyCommitmentScheme<G>>,
-    lccs2: &LCCSInstance<G, impl PolyCommitmentScheme<G>>,
+    _lccs1: &LCCSInstance<G, impl PolyCommitmentScheme<G>>,
+    _lccs2: &LCCSInstance<G, impl PolyCommitmentScheme<G>>,
 ) -> G::ScalarField
 where
     G: CurveGroup + AbsorbEmulatedFp<G::ScalarField>,
@@ -366,15 +365,15 @@ where
     // before calling this function to ensure consistent state between
     // prover and verifier. We'll check if that's the case by examining
     // the state and only absorb if needed.
-    
+
     // To avoid double-absorption, we'll use a marker in the random oracle state
     // In a real implementation, this would be better handled through proper API design
-    
+
     // Instead, let's rely on the caller to handle this properly and document it:
     // IMPORTANT: Before calling this function, the caller must ensure that
     // random_oracle.absorb(&lccs1) and random_oracle.absorb(&lccs2) have been called
     // in that exact order to ensure consistent challenge generation.
-    
+
     // Generate the folding challenge
     random_oracle.squeeze_field_elements(1)[0]
 }
@@ -399,9 +398,9 @@ where
     // The caller should have initialized the random_oracle by calling:
     //   random_oracle.absorb(&lccs1);
     //   random_oracle.absorb(&lccs2);
-    // 
+    //
     // This helps ensure challenge generation is consistent between proving and verification.
-    
+
     // 1. Generate gamma challenge for polynomial weighting
     let gamma = generate_gamma_challenge::<G, RO>(random_oracle);
 
@@ -410,7 +409,7 @@ where
 
     // 3. Run the sum-check protocol
     // The claimed sum is the weighted sum of the evaluations at each instances' points
-    let claimed_sum: G::ScalarField = (0..shape.num_matrices)
+    let _claimed_sum: G::ScalarField = (0..shape.num_matrices)
         .map(|j| {
             let gamma_j = gamma.pow([j as u64]);
             let t = shape.num_matrices;
@@ -469,7 +468,7 @@ where
     //
     // The function uses the current state of the random oracle to generate
     // a deterministic challenge, so proper initialization is critical.
-    
+
     // Generate the gamma challenge
     random_oracle.squeeze_field_elements(1)[0]
 }

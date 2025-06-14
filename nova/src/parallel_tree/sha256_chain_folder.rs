@@ -13,7 +13,7 @@ use ark_std::test_rng;
 use ark_ec::{CurveGroup};
 use ark_ff::{PrimeField, ToConstraintField};
 use std::sync::Arc;
-use tracing::{info, debug, instrument};
+use tracing::instrument;
 use crate::parallel_tree::parallel_tree_folder::ParallelTreeFolder;
 use crate::parallel_tree::parallel_tree_folder::ParallelTreeError;
 use num_cpus;
