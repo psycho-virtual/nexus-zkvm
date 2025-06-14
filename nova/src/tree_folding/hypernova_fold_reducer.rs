@@ -143,7 +143,8 @@ where
     #[instrument(level = "debug", skip(self))]
     fn strict_to_acc(&self, strict: &Self::StrictInst) -> Result<Self::AccInst, Self::Error> {
         // Synthesize step circuit witness using precomputed parameters
-        match synthesize_step_circuit_with_params::<G, C, _>(&self.params, strict, self.ck) {
+        let cs = ark_relations::r1cs::ConstraintSystem::<G::ScalarField>::new_ref();
+        match synthesize_step_circuit_with_params::<G, C, _>(cs, &self.params, strict, self.ck) {
             Ok((ccs_instance, witness)) => {
                 // Convert CCS to LCCS by committing to the witness
                 let commitment_W = witness.commit::<C>(self.ck);
@@ -173,7 +174,6 @@ where
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,7 +183,7 @@ mod tests {
     use ark_crypto_primitives::sponge::poseidon::PoseidonSponge;
     use ark_ff::Field;
     use ark_r1cs_std::fields::{fp::FpVar, FieldVar};
-    use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
+    use ark_relations::r1cs::{ConstraintSystem, ConstraintSystemRef, SynthesisError};
     use ark_std::{marker::PhantomData, test_rng};
     use hex;
     use tracing_subscriber::{
@@ -276,8 +276,9 @@ mod tests {
         let circuit = CubicCircuit::<CF> { _phantom: PhantomData };
 
         // Create a HypernovaFoldReducer to ensure types compile correctly
+        let cs = ark_relations::r1cs::ConstraintSystem::new_ref();
         let _reducer = HypernovaFoldReducer::<G1, Z, _, RO>::new(
-            setup_linearization(circuit).unwrap(),
+            setup_linearization(cs, circuit).unwrap(),
             &ck,
             &ro_config,
         );
@@ -294,8 +295,9 @@ mod tests {
         let circuit = CubicCircuit::<CF> { _phantom: PhantomData };
 
         // Create fold reducer
+        let cs = ark_relations::r1cs::ConstraintSystem::new_ref();
         let reducer = HypernovaFoldReducer::<G1, Z, _, RO>::new(
-            setup_linearization(circuit).unwrap(),
+            setup_linearization(cs, circuit).unwrap(),
             &ck,
             &ro_config,
         );
@@ -344,8 +346,9 @@ mod tests {
         let circuit = CubicCircuit::<CF> { _phantom: PhantomData };
 
         // Create fold reducer
+        let cs = ark_relations::r1cs::ConstraintSystem::new_ref();
         let reducer = HypernovaFoldReducer::<G1, Z, _, RO>::new(
-            setup_linearization(circuit).unwrap(),
+            setup_linearization(cs, circuit).unwrap(),
             &ck,
             &ro_config,
         );
@@ -445,13 +448,16 @@ mod tests {
         tracing::info!(target: TEST_TARGET, "🚀 Starting SHA-256 tree folding test");
         tracing::info!(target: TEST_TARGET, "Using actual SequentialSha256Circuit for real SHA-256 operations");
 
+        let cs = ConstraintSystem::<CF>::new_ref();
+
         let (ck, ro_config) = setup_test_environment(LARGE_SRS_DEGREE);
         let circuit =
             crate::tree_folding::circuit::sequential_sha256::SequentialSha256Circuit::<CF>::new();
 
         // Create fold reducer with SHA-256 circuit
+        
         let reducer = HypernovaFoldReducer::<G1, Z, _, RO>::new(
-            setup_linearization(circuit).unwrap(),
+            setup_linearization(cs, circuit).unwrap(),
             &ck,
             &ro_config,
         );

@@ -7,6 +7,7 @@ use crate::ccs::{LCCSInstance, CCSWitness};
 use crate::absorb::AbsorbEmulatedFp;
 use ark_crypto_primitives::sponge::{CryptographicSponge, Absorb};
 use ark_crypto_primitives::sponge::poseidon::PoseidonConfig;
+use ark_relations::r1cs::ConstraintSystem;
 use ark_spartan::polycommitments::PolyCommitmentScheme;
 use ark_std::test_rng;
 use ark_ec::{CurveGroup};
@@ -186,9 +187,11 @@ where
 
         tracing::info!(target = LOG_TARGET, "⏱️  Created {} step function inputs", leaves.len());
 
+        let cs = ConstraintSystem::<G::ScalarField>::new_ref();
+
         // Step 2: Create linearization parameters
         let circuit = SequentialSha256Circuit::<G::ScalarField>::new();
-        let params = setup_linearization(circuit)
+        let params = setup_linearization(cs, circuit)
             .map_err(|e| Sha256ChainError::SetupFailed(format!("Linearization setup failed: {:?}", e)))?;
 
         // Create the reducer with the newly created parameters
