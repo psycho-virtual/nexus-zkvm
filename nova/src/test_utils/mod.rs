@@ -21,7 +21,7 @@ use super::{
 };
 
 /// Circuit with a single public input `y`, which enforces `x**3 + x + 5 == y`.
-struct CubicCircuit {
+pub struct CubicCircuit {
     x: u64,
 }
 
