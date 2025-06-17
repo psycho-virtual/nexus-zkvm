@@ -1,0 +1,285 @@
+//! Helper definitions for quaternary circuit.
+//!
+//! Quaternary circuit accepts `g1`, `g2`, `g3`, `g4`, `g_out` (in this exact order) as its public input, where
+//! `g1`, `g2`, `g3`, `g4`, `g_out` are points on the curve G, and enforces
+//! `g_out = g1 + g2 + g3 + g4`, while having circuit satisfying witness as a trace of this computation.
+
+use ark_ec::short_weierstrass::{Projective, SWCurveConfig};
+use ark_ff::{AdditiveGroup, PrimeField};
+use ark_r1cs_std::{
+    alloc::AllocVar,
+    eq::EqGadget,
+    fields::fp::FpVar,
+    groups::{curves::short_weierstrass::ProjectiveVar, CurveVar},
+};
+use ark_relations::r1cs::{
+    ConstraintSynthesizer, ConstraintSystem, ConstraintSystemRef, SynthesisError, SynthesisMode,
+};
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use ark_std::Zero;
+
+use crate::commitment::CommitmentScheme;
+
+use super::{R1CSInstance, R1CSShape, R1CSWitness};
+
+/// Leading `Variable::One` + 5 curve points.
+const QUATERNARY_NUM_IO: usize = 16;
+
+/// Public input of quaternary circuit.
+pub struct Circuit<G1: SWCurveConfig> {
+    pub(crate) g1: Projective<G1>,
+    pub(crate) g2: Projective<G1>,
+    pub(crate) g3: Projective<G1>,
+    pub(crate) g4: Projective<G1>,
+    pub(crate) g_out: Projective<G1>,
+}
+
+impl<G1: SWCurveConfig> Circuit<G1> {
+    pub const NUM_IO: usize = QUATERNARY_NUM_IO;
+}
+
+impl<G: SWCurveConfig> Default for Circuit<G> {
+    fn default() -> Self {
+        Self {
+            g1: Projective::zero(),
+            g2: Projective::zero(),
+            g3: Projective::zero(),
+            g4: Projective::zero(),
+            g_out: Projective::zero(),
+        }
+    }
+}
+
+impl<G1: SWCurveConfig> ConstraintSynthesizer<G1::BaseField> for Circuit<G1>
+where
+    G1::BaseField: PrimeField,
+{
+    fn generate_constraints(
+        self,
+        cs: ConstraintSystemRef<G1::BaseField>,
+    ) -> Result<(), SynthesisError> {
+        let g1 = ProjectiveVar::<G1, FpVar<G1::BaseField>>::new_input(cs.clone(), || Ok(self.g1))?;
+        let g2 = ProjectiveVar::<G1, FpVar<G1::BaseField>>::new_input(cs.clone(), || Ok(self.g2))?;
+        let g3 = ProjectiveVar::<G1, FpVar<G1::BaseField>>::new_input(cs.clone(), || Ok(self.g3))?;
+        let g4 = ProjectiveVar::<G1, FpVar<G1::BaseField>>::new_input(cs.clone(), || Ok(self.g4))?;
+        let g_out =
+            ProjectiveVar::<G1, FpVar<G1::BaseField>>::new_input(cs.clone(), || Ok(self.g_out))?;
+
+        // Compute g_out = g1 + g2 + g3 + g4
+        let out = g1 + g2 + g3 + g4;
+        out.enforce_equal(&g_out)?;
+
+        Ok(())
+    }
+}
+
+/// Setup [`R1CSShape`] for a quaternary circuit, defined over `G2::BaseField`.
+pub fn setup_shape<G1, G2>() -> Result<R1CSShape<G2>, SynthesisError>
+where
+    G1: SWCurveConfig,
+    G1::BaseField: PrimeField,
+    G2: SWCurveConfig<BaseField = G1::ScalarField, ScalarField = G1::BaseField>,
+{
+    let cs = ConstraintSystem::<G1::BaseField>::new_ref();
+    cs.set_mode(SynthesisMode::Setup);
+
+    Circuit::<G1>::default().generate_constraints(cs.clone())?;
+
+    cs.finalize();
+    Ok(R1CSShape::from(cs.clone()))
+}
+
+/// Synthesize public input and a witness-trace.
+pub fn synthesize<G1, G2, C2>(
+    circuit: Circuit<G1>,
+    pp_secondary: &C2::PP,
+) -> Result<(R1CSInstance<G2, C2>, R1CSWitness<G2>), SynthesisError>
+where
+    G1: SWCurveConfig,
+    G1::BaseField: PrimeField,
+    G2: SWCurveConfig<BaseField = G1::ScalarField, ScalarField = G1::BaseField>,
+    C2: CommitmentScheme<Projective<G2>>,
+{
+    let cs = ConstraintSystem::<G1::BaseField>::new_ref();
+    cs.set_mode(SynthesisMode::Prove { construct_matrices: false });
+
+    circuit.generate_constraints(cs.clone())?;
+
+    cs.finalize();
+    let cs_borrow = cs.borrow().unwrap();
+
+    let witness = cs_borrow.witness_assignment.clone();
+    let pub_io = cs_borrow.instance_assignment.clone();
+
+    let W = R1CSWitness::<G2> { W: witness };
+
+    let commitment_W = W.commit::<C2>(pp_secondary);
+    let U = R1CSInstance::<G2, C2> { commitment_W, X: pub_io };
+
+    Ok((U, W))
+}
+
+/// Folding scheme proof for a quaternary circuit.
+#[derive(CanonicalDeserialize, CanonicalSerialize)]
+pub struct Proof<G2: SWCurveConfig, C2: CommitmentScheme<Projective<G2>>> {
+    pub(crate) U: R1CSInstance<G2, C2>,
+    pub(crate) commitment_T: C2::Commitment,
+}
+
+impl<G2, C2> Clone for Proof<G2, C2>
+where
+    G2: SWCurveConfig,
+    C2: CommitmentScheme<Projective<G2>>,
+{
+    fn clone(&self) -> Self {
+        Self {
+            U: self.U.clone(),
+            commitment_T: self.commitment_T,
+        }
+    }
+}
+
+impl<G2, C2> Default for Proof<G2, C2>
+where
+    G2: SWCurveConfig,
+    C2: CommitmentScheme<Projective<G2>>,
+{
+    fn default() -> Self {
+        let U = R1CSInstance {
+            commitment_W: Projective::zero().into(),
+            X: vec![G2::ScalarField::ZERO; QUATERNARY_NUM_IO],
+        };
+        Self {
+            U,
+            commitment_T: Projective::zero().into(),
+        }
+    }
+}
+
+macro_rules! parse_projective {
+    ($X:expr) => {
+        match &$X[..3] {
+            &[x, y, z, ..] => {
+                let point = ark_ec::CurveGroup::into_affine(Projective::<G1> { x, y, z });
+                if !point.is_on_curve() || !point.is_in_correct_subgroup_assuming_on_curve() {
+                    return None;
+                }
+                $X = &$X[3..];
+                point.into()
+            }
+            _ => return None,
+        }
+    };
+}
+
+impl<G2, C2> R1CSInstance<G2, C2>
+where
+    G2: SWCurveConfig,
+    C2: CommitmentScheme<Projective<G2>>,
+{
+    pub(crate) fn parse_quaternary_io<G1>(&self) -> Option<Circuit<G1>>
+    where
+        G2::BaseField: PrimeField,
+        G1: SWCurveConfig<BaseField = G2::ScalarField, ScalarField = G2::BaseField>,
+    {
+        let mut X = &self.X[1..];
+
+        let g1 = parse_projective!(X);
+        let g2 = parse_projective!(X);
+        let g3 = parse_projective!(X);
+        let g4 = parse_projective!(X);
+        let g_out = parse_projective!(X);
+
+        Some(Circuit { g1, g2, g3, g4, g_out })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::pedersen::PedersenCommitment;
+
+    use super::*;
+
+    use ark_ff::Field;
+    use ark_pallas::{Fq, PallasConfig, Projective};
+    use ark_std::UniformRand;
+    use ark_vesta::VestaConfig;
+
+    #[test]
+    fn parse_pub_input() {
+        let mut rng = ark_std::test_rng();
+        let g1 = Projective::rand(&mut rng);
+        let g2 = Projective::rand(&mut rng);
+        let g3 = Projective::rand(&mut rng);
+        let g4 = Projective::rand(&mut rng);
+        
+        let g_out = g1 + g2 + g3 + g4;
+
+        let expected_pub_io = Circuit::<PallasConfig> { g1, g2, g3, g4, g_out };
+        let X = [
+            Fq::ONE,
+            g1.x, g1.y, g1.z,
+            g2.x, g2.y, g2.z,
+            g3.x, g3.y, g3.z,
+            g4.x, g4.y, g4.z,
+            g_out.x, g_out.y, g_out.z,
+        ];
+        assert_eq!(X.len(), QUATERNARY_NUM_IO);
+        let r1cs = R1CSInstance::<VestaConfig, PedersenCommitment<ark_vesta::Projective>> {
+            commitment_W: Default::default(),
+            X: X.into(),
+        };
+
+        let pub_io = r1cs.parse_quaternary_io().unwrap();
+        assert_eq!(pub_io.g1, expected_pub_io.g1);
+        assert_eq!(pub_io.g2, expected_pub_io.g2);
+        assert_eq!(pub_io.g3, expected_pub_io.g3);
+        assert_eq!(pub_io.g4, expected_pub_io.g4);
+        assert_eq!(pub_io.g_out, expected_pub_io.g_out);
+
+        // incorrect length
+        let _X = &X[..10];
+        let r1cs = R1CSInstance::<VestaConfig, PedersenCommitment<ark_vesta::Projective>> {
+            commitment_W: Default::default(),
+            X: _X.into(),
+        };
+        assert!(r1cs.parse_quaternary_io::<PallasConfig>().is_none());
+
+        // not on curve
+        let mut _X = X.to_vec();
+        _X[1] -= Fq::ONE;
+        let r1cs = R1CSInstance::<VestaConfig, PedersenCommitment<ark_vesta::Projective>> {
+            commitment_W: Default::default(),
+            X: _X,
+        };
+        assert!(r1cs.parse_quaternary_io::<PallasConfig>().is_none());
+    }
+
+    #[test]
+    fn parse_synthesized() {
+        let shape = setup_shape::<PallasConfig, VestaConfig>().unwrap();
+        let mut rng = ark_std::test_rng();
+        let g1 = Projective::rand(&mut rng);
+        let g2 = Projective::rand(&mut rng);
+        let g3 = Projective::rand(&mut rng);
+        let g4 = Projective::rand(&mut rng);
+        
+        let g_out = g1 + g2 + g3 + g4;
+
+        let pp = PedersenCommitment::<ark_vesta::Projective>::setup(shape.num_vars, b"test", &());
+        let (U, _) = synthesize::<
+            PallasConfig,
+            VestaConfig,
+            PedersenCommitment<ark_vesta::Projective>,
+        >(Circuit { g1, g2, g3, g4, g_out }, &pp)
+        .unwrap();
+
+        let pub_io = U.parse_quaternary_io::<PallasConfig>().unwrap();
+
+        assert_eq!(pub_io.g1, g1);
+        assert_eq!(pub_io.g2, g2);
+        assert_eq!(pub_io.g3, g3);
+        assert_eq!(pub_io.g4, g4);
+        assert_eq!(pub_io.g_out, g_out);
+    }
+} 
