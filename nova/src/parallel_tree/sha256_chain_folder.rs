@@ -1,22 +1,22 @@
+use crate::absorb::AbsorbEmulatedFp;
 use crate::ccs::linearization::{setup_linearization, StepFunctionInput};
+use crate::ccs::{CCSWitness, LCCSInstance};
+use crate::parallel_tree::parallel_tree_folder::ParallelTreeError;
+use crate::parallel_tree::parallel_tree_folder::ParallelTreeFolder;
 use crate::poseidon_config;
 use crate::tree_folding::circuit::sequential_sha256::SequentialSha256Circuit;
-use crate::tree_folding::circuit::sha256::{conversions, calculate_sha256_native};
-use crate::tree_folding::hypernova_fold_reducer::{HypernovaFoldReducer, HypernovaFoldError};
-use crate::ccs::{LCCSInstance, CCSWitness};
-use crate::absorb::AbsorbEmulatedFp;
-use ark_crypto_primitives::sponge::{CryptographicSponge, Absorb};
+use crate::tree_folding::circuit::sha256::{calculate_sha256_native, conversions};
+use crate::tree_folding::hypernova_fold_reducer::{HypernovaFoldError, HypernovaFoldReducer};
 use ark_crypto_primitives::sponge::poseidon::PoseidonConfig;
+use ark_crypto_primitives::sponge::{Absorb, CryptographicSponge};
+use ark_ec::CurveGroup;
+use ark_ff::{PrimeField, ToConstraintField};
 use ark_relations::r1cs::ConstraintSystem;
 use ark_spartan::polycommitments::PolyCommitmentScheme;
 use ark_std::test_rng;
-use ark_ec::{CurveGroup};
-use ark_ff::{PrimeField, ToConstraintField};
+use num_cpus;
 use std::sync::Arc;
 use tracing::instrument;
-use crate::parallel_tree::parallel_tree_folder::ParallelTreeFolder;
-use crate::parallel_tree::parallel_tree_folder::ParallelTreeError;
-use num_cpus;
 
 const LOG_TARGET: &str = "nexus-nova::parallel_tree::sha256_chain_folder";
 
@@ -98,13 +98,18 @@ where
     #[instrument(level = "info")]
     pub fn new() -> Result<Self, Sha256ChainError> {
         tracing::info!(target = LOG_TARGET, "🚀 Initializing SHA-256 chain folder");
-        
+
         let mut rng = test_rng();
-        
+
         // Setup SRS for Zeromorph - use larger degree for SHA-256 circuit
         let srs_degree = 17; // 2^17 = ~130k coefficients for SHA-256 constraints
-        tracing::info!(target = LOG_TARGET, "Setting up SRS with degree 2^{} = {} coefficients", srs_degree, 1 << srs_degree);
-        
+        tracing::info!(
+            target = LOG_TARGET,
+            "Setting up SRS with degree 2^{} = {} coefficients",
+            srs_degree,
+            1 << srs_degree
+        );
+
         let srs = C::setup(srs_degree, b"sha256-chain-folder", &mut rng)
             .map_err(|e| Sha256ChainError::SetupFailed(format!("SRS setup failed: {:?}", e)))?;
 
@@ -115,16 +120,16 @@ where
         // Setup random oracle configuration
         let ro_config = poseidon_config::<G::ScalarField>();
 
-        tracing::info!(target = LOG_TARGET, "✅ SHA-256 chain folder initialized successfully");
+        tracing::info!(
+            target = LOG_TARGET,
+            "✅ SHA-256 chain folder initialized successfully"
+        );
 
-        Ok(Self {
-            ck,
-            ro_config,
-        })
+        Ok(Self { ck, ro_config })
     }
 
     /// Process a chain of messages and prove their sequential SHA-256 hashes
-    /// 
+    ///
     /// This function:
     /// 1. Takes a vector of messages
     /// 2. Creates StepFunctionInput instances for each message  
@@ -133,26 +138,38 @@ where
     #[instrument(level = "info", skip(self, messages))]
     pub fn run(&self, messages: Vec<Vec<u8>>) -> Result<Sha256ChainResult<G, C>, Sha256ChainError> {
         if messages.is_empty() {
-            return Err(Sha256ChainError::InvalidInput("Messages list cannot be empty".to_string()));
+            return Err(Sha256ChainError::InvalidInput(
+                "Messages list cannot be empty".to_string(),
+            ));
         }
 
         // Check that we have a power-of-2 number of messages for the binary tree
         let num_messages = messages.len();
         if !num_messages.is_power_of_two() {
-            return Err(Sha256ChainError::InvalidInput(
-                format!("Number of messages must be a power of 2, got {}", num_messages)
-            ));
+            return Err(Sha256ChainError::InvalidInput(format!(
+                "Number of messages must be a power of 2, got {}",
+                num_messages
+            )));
         }
 
-        tracing::info!(target = LOG_TARGET, "📝 Processing {} messages through SHA-256 chain folding", num_messages);
+        tracing::info!(
+            target = LOG_TARGET,
+            "📝 Processing {} messages through SHA-256 chain folding",
+            num_messages
+        );
 
         // Step 1: Create StepFunctionInput instances for each message
         let mut leaves = Vec::with_capacity(num_messages);
         let mut current_hash = None;
 
         for (i, message) in messages.iter().enumerate() {
-            tracing::debug!(target = LOG_TARGET, "Creating step function input {} for message of {} bytes", i, message.len());
-            
+            tracing::debug!(
+                target = LOG_TARGET,
+                "Creating step function input {} for message of {} bytes",
+                i,
+                message.len()
+            );
+
             // For the first message, use the message itself
             // For subsequent messages, use the previous hash as input
             let input_data = if i == 0 {
@@ -175,24 +192,35 @@ where
             };
 
             leaves.push(step_input);
-            
+
             tracing::debug!(
                 target = LOG_TARGET,
                 step = i,
-                input_hash = input_data.iter().map(|b| format!("{:02x}", b)).collect::<String>(),
-                output_hash = hash_result.iter().map(|b| format!("{:02x}", b)).collect::<String>(),
+                input_hash = input_data
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect::<String>(),
+                output_hash = hash_result
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect::<String>(),
                 "Finished step {i}"
             );
         }
 
-        tracing::info!(target = LOG_TARGET, "⏱️  Created {} step function inputs", leaves.len());
+        tracing::info!(
+            target = LOG_TARGET,
+            "⏱️  Created {} step function inputs",
+            leaves.len()
+        );
 
         let cs = ConstraintSystem::<G::ScalarField>::new_ref();
 
         // Step 2: Create linearization parameters
         let circuit = SequentialSha256Circuit::<G::ScalarField>::new();
-        let params = setup_linearization(cs, circuit)
-            .map_err(|e| Sha256ChainError::SetupFailed(format!("Linearization setup failed: {:?}", e)))?;
+        let params = setup_linearization(cs, circuit).map_err(|e| {
+            Sha256ChainError::SetupFailed(format!("Linearization setup failed: {:?}", e))
+        })?;
 
         // Create the reducer with the newly created parameters
         // HypernovaFoldReducer requires references with 'static lifetime. To satisfy this without
@@ -207,11 +235,7 @@ where
             C,
             SequentialSha256Circuit<G::ScalarField>,
             RO,
-        >::new(
-            params,
-            ck_static,
-            ro_static,
-        ));
+        >::new(params, ck_static, ro_static));
 
         // Create the parallel tree folder with the reducer
         let folder = ParallelTreeFolder::new(reducer);
@@ -220,11 +244,14 @@ where
 
         // Step 4: Verify the final hash matches our native computation
         let final_hash = current_hash.unwrap();
-        
+
         tracing::info!(
             target = LOG_TARGET,
             num_messages,
-            final_hash = final_hash.iter().map(|b| format!("{:02x}", b)).collect::<String>(),
+            final_hash = final_hash
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>(),
             lccs_size = lccs_instance.X.len(),
             witness_size = witness.W.len(),
             "📊 SHA-256 chain folding results"
@@ -251,9 +278,7 @@ mod tests {
     use ark_crypto_primitives::sponge::poseidon::PoseidonSponge;
     use ark_test_curves::bls12_381::{Bls12_381 as E, Fr as CF, G1Projective as G1};
     use std::sync::Once;
-    use tracing_subscriber::{
-        filter, fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer,
-    };
+    use tracing_subscriber::{filter, fmt::format::FmtSpan, layer::SubscriberExt};
 
     // Type aliases for test cases - using BLS12-381 test curve
     type TestPC = Zeromorph<E>;
@@ -265,10 +290,9 @@ mod tests {
     // Helper function to set up tracing for tests
     fn setup_test_tracing() {
         static INIT: Once = Once::new();
-        
+
         INIT.call_once(|| {
-            let filter = filter::Targets::new()
-            .with_target(TEST_TARGET, tracing::Level::DEBUG);
+            let filter = filter::Targets::new().with_target(TEST_TARGET, tracing::Level::DEBUG);
 
             let subscriber = tracing_subscriber::registry()
                 .with(
@@ -287,7 +311,7 @@ mod tests {
             // Set as global default - this will be shared across all threads
             tracing::subscriber::set_global_default(subscriber)
                 .expect("Failed to set global tracing subscriber");
-                
+
             tracing::info!(target: TEST_TARGET, "🔧 Global tracing subscriber initialized");
         });
     }
@@ -295,36 +319,46 @@ mod tests {
     #[test]
     fn test_sha256_chain_folder_creation() {
         setup_test_tracing();
-        tracing::info!(target = TEST_TARGET, "🧪 Testing SHA-256 chain folder creation");
+        tracing::info!(
+            target = TEST_TARGET,
+            "🧪 Testing SHA-256 chain folder creation"
+        );
 
         let folder = TestSha256ChainFolder::new().expect("Failed to create SHA-256 chain folder");
-        
+
         // Verify that we have reasonable worker count
         assert!(folder.num_workers() > 0);
-        
+
         tracing::info!(
             target = TEST_TARGET,
             workers = folder.num_workers(),
-            "✅ SHA-256 chain folder creation test passed (workers: {})", folder.num_workers()
+            "✅ SHA-256 chain folder creation test passed (workers: {})",
+            folder.num_workers()
         );
     }
 
     #[test]
     fn test_sha256_chain_two_messages() {
         setup_test_tracing();
-        tracing::info!(target = TEST_TARGET, "🧪 Testing SHA-256 chain with two messages");
+        tracing::info!(
+            target = TEST_TARGET,
+            "🧪 Testing SHA-256 chain with two messages"
+        );
 
         let folder = TestSha256ChainFolder::new().expect("Failed to create SHA-256 chain folder");
-        
+
         // Test with two simple messages
-        let messages = vec![
-            b"hello".to_vec(),
-            b"world".to_vec(),
-        ];
+        let messages = vec![b"hello".to_vec(), b"world".to_vec()];
 
-        tracing::info!(target = TEST_TARGET, "📝 Processing {} messages", messages.len());
+        tracing::info!(
+            target = TEST_TARGET,
+            "📝 Processing {} messages",
+            messages.len()
+        );
 
-        let result = folder.run(messages).expect("Failed to process SHA-256 chain");
+        let result = folder
+            .run(messages)
+            .expect("Failed to process SHA-256 chain");
 
         // Verify results
         assert_eq!(result.num_messages, 2);
@@ -334,7 +368,11 @@ mod tests {
 
         tracing::info!(
             target = TEST_TARGET,
-            final_hash = result.final_hash.iter().map(|b| format!("{:02x}", b)).collect::<String>(),
+            final_hash = result
+                .final_hash
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>(),
             "✅ Two-message SHA-256 chain test passed"
         );
     }
@@ -342,10 +380,13 @@ mod tests {
     #[test]
     fn test_sha256_chain_four_messages() {
         setup_test_tracing();
-        tracing::info!(target = TEST_TARGET, "🧪 Testing SHA-256 chain with four messages");
+        tracing::info!(
+            target = TEST_TARGET,
+            "🧪 Testing SHA-256 chain with four messages"
+        );
 
         let folder = TestSha256ChainFolder::new().expect("Failed to create SHA-256 chain folder");
-        
+
         // Test with four messages
         let messages = vec![
             b"message 1".to_vec(),
@@ -354,9 +395,15 @@ mod tests {
             b"message 4".to_vec(),
         ];
 
-        tracing::info!(target = TEST_TARGET, "📝 Processing {} messages", messages.len());
+        tracing::info!(
+            target = TEST_TARGET,
+            "📝 Processing {} messages",
+            messages.len()
+        );
 
-        let result = folder.run(messages).expect("Failed to process SHA-256 chain");
+        let result = folder
+            .run(messages)
+            .expect("Failed to process SHA-256 chain");
 
         // Verify results
         assert_eq!(result.num_messages, 4);
@@ -366,7 +413,11 @@ mod tests {
 
         tracing::info!(
             target = TEST_TARGET,
-            final_hash = result.final_hash.iter().map(|b| format!("{:02x}", b)).collect::<String>(),
+            final_hash = result
+                .final_hash
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>(),
             "✅ Four-message SHA-256 chain test passed"
         );
     }
@@ -374,22 +425,29 @@ mod tests {
     #[test]
     fn test_sha256_chain_64_messages() {
         setup_test_tracing();
-        tracing::info!(target = TEST_TARGET, "🧪 Testing SHA-256 chain with 64 messages (depth=6)");
+        tracing::info!(
+            target = TEST_TARGET,
+            "🧪 Testing SHA-256 chain with 64 messages (depth=6)"
+        );
 
         let folder = TestSha256ChainFolder::new().expect("Failed to create SHA-256 chain folder");
-        
+
         // Generate 64 messages
         let messages: Vec<Vec<u8>> = (1..=64)
             .map(|i| format!("message_{:02}", i).into_bytes())
             .collect();
 
-        tracing::info!(target = TEST_TARGET, "📝 Processing {} messages (tree depth: {})", 
-            messages.len(), 
+        tracing::info!(
+            target = TEST_TARGET,
+            "📝 Processing {} messages (tree depth: {})",
+            messages.len(),
             (messages.len() as f64).log2() as usize
         );
 
         let start_time = std::time::Instant::now();
-        let result = folder.run(messages).expect("Failed to process SHA-256 chain");
+        let result = folder
+            .run(messages)
+            .expect("Failed to process SHA-256 chain");
         let duration = start_time.elapsed();
 
         // Verify results
@@ -401,12 +459,20 @@ mod tests {
         tracing::info!(
             target = TEST_TARGET,
             duration_ms = duration.as_millis(),
-            final_hash = result.final_hash.iter().map(|b| format!("{:02x}", b)).collect::<String>(),
+            final_hash = result
+                .final_hash
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>(),
             lccs_size = result.lccs_instance.X.len(),
             witness_size = result.witness.W.len(),
-            "✅ 64-message SHA-256 chain test completed in {}ms (final_hash: {final_hash})", 
+            "✅ 64-message SHA-256 chain test completed in {}ms (final_hash: {final_hash})",
             duration.as_millis(),
-            final_hash = result.final_hash.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+            final_hash = result
+                .final_hash
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>()
         );
     }
-} 
+}

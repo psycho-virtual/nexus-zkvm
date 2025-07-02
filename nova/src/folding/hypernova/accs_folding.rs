@@ -403,7 +403,6 @@ mod tests {
     use crate::{ccs::CCSWitness, r1cs::tests::to_field_elements, zeromorph::Zeromorph};
     use ark_crypto_primitives::sponge::poseidon::PoseidonSponge;
     use ark_ec::short_weierstrass::Projective;
-    use ark_ec::AdditiveGroup;
     use ark_ff::UniformRand;
     use ark_std::{ops::Neg, test_rng, One, Zero};
     use ark_test_curves::bls12_381::{g1::Config as G, Bls12_381 as E, Fr};

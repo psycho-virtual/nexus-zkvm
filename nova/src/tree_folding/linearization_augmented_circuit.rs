@@ -16,10 +16,9 @@ use ark_r1cs_std::{
     alloc::{AllocVar, AllocationMode},
     eq::EqGadget,
     fields::{fp::FpVar, FieldVar},
-    prelude::Boolean,
     R1CSVar,
 };
-use ark_relations::r1cs::{ConstraintSystemRef, Namespace, SynthesisError};
+use ark_relations::r1cs::{Namespace, SynthesisError};
 use ark_std::marker::PhantomData;
 use ark_std::ops::Neg;
 use ark_std::Zero;
@@ -211,7 +210,7 @@ where
 /// was correctly linearized. It performs the following checks:
 ///
 /// 1. Re-derives challenges γ and β and enforces consistency with provided values
-/// 2. Computes expected sum from γ-powers and vs values 
+/// 2. Computes expected sum from γ-powers and vs values
 /// 3. Verifies sumcheck round consistency: p_k(0) + p_k(1) = p_{k-1}(r_{k-1})
 /// 4. Derives randomness vector from sumcheck transcript
 /// 5. Computes equality polynomial e₂ = eq(β, r_x)
@@ -235,7 +234,7 @@ where
 /// verification constraints cannot be satisfied.
 #[instrument(
     level = "debug",
-    skip(cs, random_oracle, input),
+    skip(random_oracle, input),
     fields(
         sumcheck_rounds = sumcheck_rounds,
         beta_len = input.linearization.beta.len(),
@@ -245,7 +244,6 @@ where
     target = LOG_TARGET
 )]
 pub fn verify_linearization_in_circuit<G1, RO>(
-    cs: ConstraintSystemRef<G1::ScalarField>,
     random_oracle: &mut RO::Var,
     input: &LinearizationAugmentedVar<G1, RO>,
     sumcheck_rounds: usize,
@@ -320,10 +318,11 @@ where
     // --------------------------------------------------------------------
     // 2. Compute expected sum for sumcheck verification (which is 0 since there are no LCCS instances to addd)
     // --------------------------------------------------------------------
-    let expected_sum_of_polynomial: FpVar<G1::ScalarField> = FpVar::<G1::ScalarField>::Constant(G1::ScalarField::ZERO);
+    let expected_sum_of_polynomial: FpVar<G1::ScalarField> =
+        FpVar::<G1::ScalarField>::Constant(G1::ScalarField::ZERO);
 
     // --------------------------------------------------------------------
-    // 3. Verify all sumcheck rounds 
+    // 3. Verify all sumcheck rounds
     // --------------------------------------------------------------------
     let (expected, sumcheck_random_challenges) = verify_all_sumcheck::<G1, RO>(
         random_oracle,
@@ -400,7 +399,10 @@ where
         e
     })?;
 
-    Ok(LinearizationVerificationOutput { rs_p: sumcheck_random_challenges, cr: beta[0].clone() })
+    Ok(LinearizationVerificationOutput {
+        rs_p: sumcheck_random_challenges,
+        cr: beta[0].clone(),
+    })
 }
 
 /// Generate the challenges (γ, β) for the sumcheck verification.
@@ -680,6 +682,7 @@ mod tests {
     use ark_ff::Field;
     use ark_r1cs_std::{alloc::AllocVar, fields::fp::FpVar, R1CSVar};
     use ark_relations::r1cs::ConstraintSystem;
+    use ark_relations::r1cs::ConstraintSystemRef;
     use ark_std::{marker::PhantomData, test_rng, UniformRand};
     use tracing_subscriber::{
         filter, fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt,
@@ -696,7 +699,9 @@ mod tests {
 
     // Helper function to set up tracing for tests
     fn setup_test_tracing() -> tracing::subscriber::DefaultGuard {
-        let filter = filter::Targets::new().with_target(TEST_TARGET, tracing::Level::DEBUG).with_target("gr1cs", tracing::Level::TRACE);
+        let filter = filter::Targets::new()
+            .with_target(TEST_TARGET, tracing::Level::DEBUG)
+            .with_target("gr1cs", tracing::Level::TRACE);
         tracing_subscriber::registry()
             .with(
                 tracing_subscriber::fmt::layer()
@@ -841,7 +846,7 @@ mod tests {
         let cs = ConstraintSystem::<Fr>::new_ref();
 
         // Setup polynomial commitment for CCS
-        let (shape, u, w, ck) =
+        let (_shape, _u, _w, _ck) =
             setup_test_ccs::<ark_bn254::g1::Config, Z>(42, None, Some(&mut rng));
 
         let config = poseidon_config::<Fr>();
@@ -851,6 +856,7 @@ mod tests {
         // Create a fresh random oracle to generate consistent challenges
         let mut native_ro = PoseidonSponge::new(&config);
         native_ro.absorb(&vk);
+
 
         // Generate challenges using the same method as the circuit
         let gamma: Fr = native_ro.squeeze_field_elements::<Fr>(1)[0];
@@ -891,7 +897,7 @@ mod tests {
         let r_k: Fr = circuit_ro.squeeze_field_elements::<Fr>(1)[0];
 
         // Compute e2 = eq(β, r_k) using the same formula as in the circuit
-        let e2: Fr = beta
+        let _e2: Fr = beta
             .iter()
             .zip([r_k].iter()) // For sumcheck_rounds=1, rs_p=[r_k]
             .map(|(ai, bi)| {
@@ -909,7 +915,7 @@ mod tests {
             (Fr::ONE, vec![0usize, 1usize]),
             (Fr::ONE.neg(), vec![2usize]),
         ];
-        let term_sum: Fr = (0..NUM_MULTISETS)
+        let _term_sum: Fr = (0..NUM_MULTISETS)
             .map(|i| {
                 multiset_coeffs[i]
                     .1
@@ -964,7 +970,6 @@ mod tests {
         circuit_random_oracle.absorb(&input.vk).unwrap();
 
         let result = verify_linearization_in_circuit::<ark_bn254::g1::Config, PoseidonSponge<Fr>>(
-            cs.clone(),
             &mut circuit_random_oracle,
             &input,
             sumcheck_rounds,
@@ -993,7 +998,6 @@ mod tests {
         tracing::info!(target: TEST_TARGET, "✓ Full linearization workflow test completed - {} constraints", cs.num_constraints());
     }
 
-
     #[test]
     fn test_cubic_linearization_augmented_circuit() {
         let _guard = setup_test_tracing();
@@ -1021,7 +1025,7 @@ mod tests {
 
         // Step 2: Create step function input for the cubic circuit
         let step_input = crate::ccs::linearization::StepFunctionInput {
-            i: Fr::from(1u64),       // Step index
+            i: Fr::from(1u64),         // Step index
             z_i: vec![Fr::from(3u64)], // Input: 3^3 + 3 + 5 = 27 + 3 + 5 = 35
         };
 
@@ -1030,15 +1034,21 @@ mod tests {
         let mut prover_random_oracle = PoseidonSponge::new(&config);
         // Absorb verification key to establish consistent random oracle state
         prover_random_oracle.absorb(&vk);
-        
+
         let cs = ConstraintSystem::new_ref();
-        
+
         let linearization_result = crate::ccs::linearization::synthesize_and_linearize_step::<
             Projective<ark_bn254::g1::Config>,
             Z,
             _,
             _,
-        >(cs.clone(), &linearization_params, &step_input, &ck, &mut prover_random_oracle)
+        >(
+            cs.clone(),
+            &linearization_params,
+            &step_input,
+            &ck,
+            &mut prover_random_oracle,
+        )
         .unwrap();
 
         tracing::info!(target: TEST_TARGET, "✓ Real linearization completed successfully");
@@ -1058,12 +1068,13 @@ mod tests {
         };
 
         // Step 5: Allocate the LCCSLinearizationVar using new_variable with real data
-        let augmented_input = LinearizationAugmentedVar::<ark_bn254::g1::Config, PoseidonSponge<Fr>>::new_variable(
-            cs.clone(),
-            || Ok(&native_input),
-            ark_r1cs_std::alloc::AllocationMode::Witness,
-        )
-        .unwrap();
+        let augmented_input =
+            LinearizationAugmentedVar::<ark_bn254::g1::Config, PoseidonSponge<Fr>>::new_variable(
+                cs.clone(),
+                || Ok(&native_input),
+                ark_r1cs_std::alloc::AllocationMode::Witness,
+            )
+            .unwrap();
 
         tracing::info!(target: TEST_TARGET, "✓ Augmented circuit variables allocated successfully");
 
@@ -1075,15 +1086,12 @@ mod tests {
 
         // Step 7: Run the augmented circuit verification
         let sumcheck_rounds = native_input.linearization.sumcheck_rounds;
-        let verification_result = verify_linearization_in_circuit::<
-            ark_bn254::g1::Config,
-            PoseidonSponge<Fr>,
-        >(
-            cs.clone(),
-            &mut circuit_random_oracle,
-            &augmented_input,
-            sumcheck_rounds,
-        );
+        let verification_result =
+            verify_linearization_in_circuit::<ark_bn254::g1::Config, PoseidonSponge<Fr>>(
+                &mut circuit_random_oracle,
+                &augmented_input,
+                sumcheck_rounds,
+            );
 
         match verification_result {
             Ok(output) => {
@@ -1109,7 +1117,7 @@ mod tests {
                     );
                 } else {
                     tracing::error!(target: TEST_TARGET, "❌ Some constraints are not satisfied");
-                    
+
                     // Try to get more detailed information about which constraints failed
                     let cs_borrow = cs.borrow().unwrap();
                     tracing::error!(
@@ -1122,26 +1130,35 @@ mod tests {
                 }
 
                 // Verify the original CCS and LCCS instances are still satisfied
-                linearization_result.ccs_shape.is_satisfied(
-                    &linearization_result.ccs_instance,
-                    &native_input.linearization.witness,
-                    &ck,
-                ).unwrap();
+                linearization_result
+                    .ccs_shape
+                    .is_satisfied(
+                        &linearization_result.ccs_instance,
+                        &native_input.linearization.witness,
+                        &ck,
+                    )
+                    .unwrap();
 
-                linearization_result.ccs_shape.is_satisfied_linearized(
-                    &native_input.linearization.lccs_instance,
-                    &native_input.linearization.witness,
-                    &ck,
-                ).unwrap();
+                linearization_result
+                    .ccs_shape
+                    .is_satisfied_linearized(
+                        &native_input.linearization.lccs_instance,
+                        &native_input.linearization.witness,
+                        &ck,
+                    )
+                    .unwrap();
 
                 tracing::info!(target: TEST_TARGET, "✓ Original CCS and LCCS instances remain satisfied");
 
                 // The test passes if we get here without panicking
-                assert!(true, "Real linearization augmented circuit test completed successfully");
+                assert!(
+                    true,
+                    "Real linearization augmented circuit test completed successfully"
+                );
             }
             Err(e) => {
                 tracing::error!(target: TEST_TARGET, "❌ Augmented circuit verification failed: {:?}", e);
-                
+
                 // Even if verification fails, let's check if the constraint system structure is sound
                 tracing::info!(
                     target: TEST_TARGET,
@@ -1159,7 +1176,7 @@ mod tests {
 
         tracing::info!(target: TEST_TARGET, "✅ Real linearization augmented circuit test completed");
     }
-    
+
     // TODO: The sumcheck test is failing for some reason. We would need to debug it more
     #[test]
     #[ignore]
@@ -1179,7 +1196,8 @@ mod tests {
 
         // Step 1: Setup linearization parameters using the SHA256 circuit
         let setup_cs = ConstraintSystem::new_ref();
-        let sha256_circuit = crate::tree_folding::circuit::sequential_sha256::SequentialSha256Circuit::<Fr>::new();
+        let sha256_circuit =
+            crate::tree_folding::circuit::sequential_sha256::SequentialSha256Circuit::<Fr>::new();
         let linearization_params = crate::ccs::linearization::setup_linearization::<
             Projective<ark_bn254::g1::Config>,
             _,
@@ -1193,12 +1211,14 @@ mod tests {
         // Step 2: Create step function input for SHA256 circuit
         // Use "hello world" as initial input, hash it, and convert to field element
         let initial_message = b"hello world";
-        let initial_hash = crate::tree_folding::circuit::sha256::calculate_sha256_native(initial_message);
-        let hash_as_field = crate::tree_folding::circuit::sha256::conversions::bytes_to_field::<Fr>(&initial_hash);
-        
+        let initial_hash =
+            crate::tree_folding::circuit::sha256::calculate_sha256_native(initial_message);
+        let hash_as_field =
+            crate::tree_folding::circuit::sha256::conversions::bytes_to_field::<Fr>(&initial_hash);
+
         let step_input = crate::ccs::linearization::StepFunctionInput {
-            i: Fr::from(1u64),           // Step index
-            z_i: vec![hash_as_field],    // Input: hash of "hello world" as field element
+            i: Fr::from(1u64),        // Step index
+            z_i: vec![hash_as_field], // Input: hash of "hello world" as field element
         };
 
         tracing::info!(target: TEST_TARGET, "Input hash (hex): {}", 
@@ -1209,13 +1229,19 @@ mod tests {
         let mut prover_random_oracle = PoseidonSponge::new(&config);
         // Absorb verification key to establish consistent random oracle state
         prover_random_oracle.absorb(&vk);
-        
+
         let linearization_result = crate::ccs::linearization::synthesize_and_linearize_step::<
             Projective<ark_bn254::g1::Config>,
             Z,
             _,
             _,
-        >(cs, &linearization_params, &step_input, &ck, &mut prover_random_oracle)
+        >(
+            cs,
+            &linearization_params,
+            &step_input,
+            &ck,
+            &mut prover_random_oracle,
+        )
         .unwrap();
 
         // Create a new constraint system for the augmented circuit verification
@@ -1238,12 +1264,13 @@ mod tests {
         };
 
         // Step 5: Allocate the LCCSLinearizationVar using new_variable with real data
-        let augmented_input = LinearizationAugmentedVar::<ark_bn254::g1::Config, PoseidonSponge<Fr>>::new_variable(
-            cs.clone(),
-            || Ok(&native_input),
-            ark_r1cs_std::alloc::AllocationMode::Witness,
-        )
-        .unwrap();
+        let augmented_input =
+            LinearizationAugmentedVar::<ark_bn254::g1::Config, PoseidonSponge<Fr>>::new_variable(
+                cs.clone(),
+                || Ok(&native_input),
+                ark_r1cs_std::alloc::AllocationMode::Witness,
+            )
+            .unwrap();
 
         tracing::info!(target: TEST_TARGET, "✓ SHA256 augmented circuit variables allocated successfully");
 
@@ -1255,15 +1282,12 @@ mod tests {
 
         // Step 7: Run the augmented circuit verification
         let sumcheck_rounds = native_input.linearization.sumcheck_rounds;
-        let verification_result = verify_linearization_in_circuit::<
-            ark_bn254::g1::Config,
-            PoseidonSponge<Fr>,
-        >(
-            cs.clone(),
-            &mut circuit_random_oracle,
-            &augmented_input,
-            sumcheck_rounds,
-        );
+        let verification_result =
+            verify_linearization_in_circuit::<ark_bn254::g1::Config, PoseidonSponge<Fr>>(
+                &mut circuit_random_oracle,
+                &augmented_input,
+                sumcheck_rounds,
+            );
 
         match verification_result {
             Ok(output) => {
@@ -1289,7 +1313,7 @@ mod tests {
                     );
                 } else {
                     tracing::error!(target: TEST_TARGET, "❌ Some SHA256 constraints are not satisfied");
-                    
+
                     // Try to get more detailed information about which constraints failed
                     let cs_borrow = cs.borrow().unwrap();
                     tracing::error!(
@@ -1303,19 +1327,27 @@ mod tests {
                 }
 
                 // Verify the original CCS and LCCS instances are still satisfied
-                if linearization_result.ccs_shape.is_satisfied(
-                    &linearization_result.ccs_instance,
-                    &native_input.linearization.witness,
-                    &ck,
-                ).is_err() {
+                if linearization_result
+                    .ccs_shape
+                    .is_satisfied(
+                        &linearization_result.ccs_instance,
+                        &native_input.linearization.witness,
+                        &ck,
+                    )
+                    .is_err()
+                {
                     return Err(SynthesisError::Unsatisfiable);
                 }
 
-                if linearization_result.ccs_shape.is_satisfied_linearized(
-                    &native_input.linearization.lccs_instance,
-                    &native_input.linearization.witness,
-                    &ck,
-                ).is_err() {
+                if linearization_result
+                    .ccs_shape
+                    .is_satisfied_linearized(
+                        &native_input.linearization.lccs_instance,
+                        &native_input.linearization.witness,
+                        &ck,
+                    )
+                    .is_err()
+                {
                     return Err(SynthesisError::Unsatisfiable);
                 }
 
@@ -1323,16 +1355,20 @@ mod tests {
 
                 // Verify the computational relationship is preserved
                 // The expected output should be SHA256(SHA256("hello world"))
-                let expected_next_hash = crate::tree_folding::circuit::sha256::calculate_sha256_native(&initial_hash);
+                let expected_next_hash =
+                    crate::tree_folding::circuit::sha256::calculate_sha256_native(&initial_hash);
                 tracing::info!(target: TEST_TARGET, "Expected next hash (hex): {}", 
                     expected_next_hash.iter().map(|b| format!("{:02x}", b)).collect::<String>());
 
                 // The test passes if we get here without panicking
-                assert!(true, "Real SHA256 linearization augmented circuit test completed successfully");
+                assert!(
+                    true,
+                    "Real SHA256 linearization augmented circuit test completed successfully"
+                );
             }
             Err(e) => {
                 tracing::error!(target: TEST_TARGET, "❌ SHA256 augmented circuit verification failed: {:?}", e);
-                
+
                 // Even if verification fails, let's check if the constraint system structure is sound
                 tracing::info!(
                     target: TEST_TARGET,
@@ -1351,5 +1387,4 @@ mod tests {
         tracing::info!(target: TEST_TARGET, "✅ Real SHA256 linearization augmented circuit test completed");
         Ok(())
     }
-
 }
