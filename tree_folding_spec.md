@@ -55,19 +55,23 @@ nova/src/tree_folding/
 ├── mod.rs                    # Module exports and types
 └── circuit/                  # Circuit implementations
     ├── mod.rs                # Circuit module exports
-    ├── sumcheck.rs           # Sumcheck verifier circuit implementation
-    ├── lccs_verifier.rs      # LCCS folding verifier gadget
-    └── ccs_verifier.rs       # CCS folding verifier gadget
+    ├── sumcheck.rs           # Core sumcheck verification functions
+    │                         # - verify_all_sumcheck (moved from linearization_augmented_circuit.rs)
+    │                         # - compute_equality_polynomial (moved from linearization_augmented_circuit.rs)
+    │                         # - verify_target_sumcheck_for_ccs_folding
+    │                         # - verify_target_sumcheck_for_lccs_folding
+    ├── lccs_verifier.rs      # LCCS folding verifier gadget (uses sumcheck.rs functions)
+    └── ccs_verifier.rs       # CCS folding verifier gadget (uses sumcheck.rs functions)
 ```
 
 ## Core Data Structures
 
-### 1. Multi-CCS Proof Structure
+### 1. CCS Folding Proof Structure
 
 ```rust
 /// Proof for folding multiple CCS instances together
 /// Reuses existing linearization infrastructure from linearization.rs
-pub struct MultiCCSProof<G: Group> {
+pub struct CCSFoldingProof<G: Group> {
     /// Sumcheck proof for the folding (reuses MLSumcheck from linearization.rs)
     pub sumcheck_proof: Vec<ProverMsg<G::ScalarField>>,
     /// Challenge gamma used in the sumcheck polynomial
@@ -76,13 +80,13 @@ pub struct MultiCCSProof<G: Group> {
     pub beta: Vec<G::ScalarField>,
     /// Evaluation point r_x from sumcheck
     pub r_x: Vec<G::ScalarField>,
-    /// Claimed evaluations θ_{j,1} for each matrix j and first instance
-    pub thetas1: Vec<G::ScalarField>,
-    /// Claimed evaluations θ_{j,2} for each matrix j and second instance
-    pub thetas2: Vec<G::ScalarField>,
+    /// Claimed evaluations θ_{j,1} for each matrix j and first CCS instance
+    pub theta1: Vec<G::ScalarField>,
+    /// Claimed evaluations θ_{j,2} for each matrix j and second CCS instance
+    pub theta2: Vec<G::ScalarField>,
 }
 
-impl<G: Group> MultiCCSProof<G> {
+impl<G: Group> CCSFoldingProof<G> {
     /// Prove folding of two CCS instances into LCCS
     /// Uses construct_ccs_polynomial and linearization infrastructure
     pub fn prove_as_subprotocol<C: PolyCommitmentScheme<G>, RO: RandomOracle>(
@@ -109,13 +113,13 @@ impl<G: Group> MultiCCSProof<G> {
         let r_x = prover_state.randomness;
 
         // Step 5: Compute theta values for both instances
-        let thetas1 = compute_theta_values(shape, &z1, &r_x);
-        let thetas2 = compute_theta_values(shape, &z2, &r_x);
+        let theta1 = compute_theta_values(shape, &z1, &r_x);
+        let theta2 = compute_theta_values(shape, &z2, &r_x);
 
         // Step 6: Fold the instances using existing fold_and_linearize_ccs
         let (lccs_folded, witness_folded) = fold_and_linearize_ccs(
             shape, u1, u2, w1, w2, 
-            &thetas1, &thetas2, &r_x, random_oracle
+            &theta1, &theta2, &r_x, random_oracle
         )?;
 
         let proof = Self {
@@ -123,8 +127,8 @@ impl<G: Group> MultiCCSProof<G> {
             gamma,
             beta,
             r_x,
-            thetas1,
-            thetas2,
+            theta1,
+            theta2,
         };
 
         Ok((proof, lccs_folded, witness_folded))
@@ -172,7 +176,7 @@ impl<G: Group> MultiCCSProof<G> {
         // This uses the same folding verification as in fold_and_linearize_ccs
         verify_ccs_folding_consistency(
             shape, U1, U2, U_folded, 
-            &self.thetas1, &self.thetas2, &self.r_x, random_oracle
+            &self.theta1, &self.theta2, &self.r_x, random_oracle
         )?;
 
         Ok(())
@@ -198,8 +202,8 @@ fn verify_ccs_folding_consistency<G: CurveGroup, C: PolyCommitmentScheme<G>, RO:
     u1: &CCSInstance<G, C>,
     u2: &CCSInstance<G, C>,
     u_folded: &LCCSInstance<G, C>,
-    thetas1: &[G::ScalarField],
-    thetas2: &[G::ScalarField],
+    theta1: &[G::ScalarField],
+    theta2: &[G::ScalarField],
     r_x: &[G::ScalarField],
     random_oracle: &mut RO,
 ) -> Result<(), Error> {
@@ -208,20 +212,20 @@ fn verify_ccs_folding_consistency<G: CurveGroup, C: PolyCommitmentScheme<G>, RO:
 }
 ```
 
-### 2. Multi-LCCS Proof Structure
+### 2. LCCS Folding Proof Structure
 
 ```rust
 /// Proof for folding multiple LCCS instances together
-pub struct MultiLCCSProof<G: Group> {
+pub struct LCCSFoldingProof<G: Group> {
     /// Sumcheck proof for the folding
     pub sumcheck_proof: SumcheckProof<G::ScalarField>,
-    /// Claimed evaluations σ_{j,k} for each matrix j and instance k
-    pub sigmas: Vec<Vec<G::ScalarField>>,
-    /// Claimed evaluations θ_{j,k} for each matrix j and instance k
-    pub thetas: Vec<Vec<G::ScalarField>>,
+    /// Claimed evaluations σ_{j,1} for each matrix j and first LCCS instance
+    pub sigma1: Vec<G::ScalarField>,
+    /// Claimed evaluations σ_{j,2} for each matrix j and second LCCS instance  
+    pub sigma2: Vec<G::ScalarField>,
 }
 
-impl<G: Group> MultiLCCSProof<G> {
+impl<G: Group> LCCSFoldingProof<G> {
     /// Prove folding of two LCCS instances
     pub fn prove_as_subprotocol<C: PolyCommitmentScheme<G>>(
         random_oracle: &mut RO,
@@ -250,7 +254,7 @@ impl<G: Group> MultiLCCSProof<G> {
 
 ### 3. Reused Components from linearization.rs
 
-The MultiCCSProof and MultiLCCSProof implementations will reuse the following existing components from `nova/src/ccs/linearization.rs`:
+The CCSFoldingProof and LCCSFoldingProof implementations will reuse the following existing components from `nova/src/ccs/linearization.rs`:
 
 - **`construct_css_polynomial`** - For building the sumcheck polynomial g(x)
 - **`MLSumcheck::prove_as_subprotocol`** - For running the sumcheck protocol
@@ -261,27 +265,116 @@ The MultiCCSProof and MultiLCCSProof implementations will reuse the following ex
 
 ### 4. Circuit Gadgets
 
-```rust
-/// Gadget for verifying sumcheck proofs in-circuit
-pub struct SumcheckVerifierGadget;
+#### Sumcheck Verifier Circuit (`circuit/sumcheck.rs`)
 
-impl SumcheckVerifierGadget {
-    /// Verify all sumcheck rounds in-circuit
-    pub fn verify_all_sumcheck<G1, RO>(
-        random_oracle: &mut RO::Var,
-        sumcheck_evals: &[Vec<FpVar<G1::ScalarField>>],
-        expected_sum_of_polynomial: FpVar<G1::ScalarField>,
-        sumcheck_rounds: usize,
-    ) -> Result<(FpVar<G1::ScalarField>, Vec<FpVar<G1::ScalarField>>), SynthesisError> {
-        // Implementation using lagrange interpolation
-    }
+This module contains the core sumcheck verification gadgets moved and adapted from `linearization_augmented_circuit.rs`:
+
+```rust
+/// Verify all sumcheck rounds and collect challenges
+/// Moved from linearization_augmented_circuit.rs
+pub fn verify_all_sumcheck<G1, RO>(
+    random_oracle: &mut RO::Var,
+    sumcheck_evals: &[Vec<FpVar<G1::ScalarField>>],
+    expected_sum_of_polynomial: FpVar<G1::ScalarField>,
+    sumcheck_rounds: usize,
+) -> Result<(FpVar<G1::ScalarField>, Vec<FpVar<G1::ScalarField>>), SynthesisError>
+where
+    G1: SWCurveConfig,
+    G1::BaseField: PrimeField,
+    RO: SpongeWithGadget<G1::ScalarField>,
+    RO::Var: CryptographicSpongeVar<G1::ScalarField, RO, Parameters = RO::Config>,
+{
+    // Implementation performs complete sumcheck verification process:
+    // 1. Uses provided expected sum as initial value for verification  
+    // 2. Iterates through all sumcheck proof rounds
+    // 3. For each round: absorbs polynomial evaluations, generates challenge r_k, 
+    //    verifies round consistency p_k(0) + p_k(1) = p_{k-1}(r_{k-1}),
+    //    computes next expected value via Lagrange interpolation
+    // 4. Returns final expected value and vector of challenge points r_k
 }
 
-/// Gadget for verifying CCS folding with CycleFold
-pub struct MultiCCSProofVerifierGadget;
+/// Compute the equality polynomial eq(a, b) = ∏ᵢ [aᵢ·bᵢ + (1-aᵢ)·(1-bᵢ)]
+/// Moved from linearization_augmented_circuit.rs
+pub fn compute_equality_polynomial<G1>(
+    a: &[FpVar<G1::ScalarField>],
+    b: &[FpVar<G1::ScalarField>],
+) -> Result<FpVar<G1::ScalarField>, SynthesisError>
+where
+    G1: SWCurveConfig,
+    G1::BaseField: PrimeField,
+{
+    // Implementation computes multilinear extension of equality predicate
+    // Used for computing both e1 = eq(r_x, r'_x) and e2 = eq(β, r'_x)
+}
 
-impl MultiCCSProofVerifierGadget {
+/// Verify target sumcheck equality for CCS folding
+/// For CCS folding: μ = 0 (no LCCS instances), only CCS instances (ν = 2)
+/// Mathematical expression:
+/// c = γ^1 · e2 · ∑_{i=1}^q c_i · ∏_{j∈S_i} θ_{j,1} + γ^2 · e2 · ∑_{i=1}^q c_i · ∏_{j∈S_i} θ_{j,2}
+/// 
+/// Full expansion for two CCS instances (k=1,2):
+/// - k=1 term: γ^1 · e2 · ∑_{i=1}^q c_i · ∏_{j∈S_i} θ_{j,1}
+/// - k=2 term: γ^2 · e2 · ∑_{i=1}^q c_i · ∏_{j∈S_i} θ_{j,2}
+/// 
+/// where:
+/// - e2 = eq(β, r'_x) 
+/// - θ_{j,1} = ∑_{y∈{0,1}^s'} M_j(r'_x, y) · z_{2,1}(y) (first CCS witness evaluations)
+/// - θ_{j,2} = ∑_{y∈{0,1}^s'} M_j(r'_x, y) · z_{2,2}(y) (second CCS witness evaluations)
+/// - γ^1 scales first CCS instance, γ^2 scales second CCS instance
+/// - ∑_{i=1}^q c_i · ∏_{j∈S_i} represents the CCS constraint structure
+pub fn verify_target_sumcheck_for_ccs_folding<G1>(
+    gamma: &FpVar<G1::ScalarField>,
+    e2: &FpVar<G1::ScalarField>,
+    theta1: &[FpVar<G1::ScalarField>], // θ_{j,1} for each matrix j for first CCS instance
+    theta2: &[FpVar<G1::ScalarField>], // θ_{j,2} for each matrix j for second CCS instance
+    multiset_coeffs: &[(G1::ScalarField, Vec<usize>)], // (c_i, S_i) pairs
+) -> Result<FpVar<G1::ScalarField>, SynthesisError>
+where
+    G1: SWCurveConfig,
+    G1::BaseField: PrimeField,
+{
+    // Implementation computes: γ^1 · e2 · ∑_{i=1}^q c_i · ∏_{j∈S_i} θ_{j,1} + γ^2 · e2 · ∑_{i=1}^q c_i · ∏_{j∈S_i} θ_{j,2}
+}
+
+/// Verify target sumcheck equality for LCCS folding  
+/// For LCCS folding: ν = 0 (no CCS instances), only LCCS instances (μ = 2)
+/// Mathematical expression:
+/// c = ∑_{j∈[t]} γ^j · e1 · σ_{j,1} + ∑_{j∈[t]} γ^(t+j) · e1 · σ_{j,2}
+/// 
+/// Full expansion for two LCCS instances (k=1,2):
+/// - k=1 term: ∑_{j∈[t]} γ^((1-1)·t+j) · e1 · σ_{j,1} = ∑_{j∈[t]} γ^j · e1 · σ_{j,1}
+/// - k=2 term: ∑_{j∈[t]} γ^((2-1)·t+j) · e1 · σ_{j,2} = ∑_{j∈[t]} γ^(t+j) · e1 · σ_{j,2}
+/// 
+/// where:
+/// - e1 = eq(r_x, r'_x)
+/// - σ_{j,1} = ∑_{y∈{0,1}^s'} M_j(r'_x, y) · z_{1,1}(y) (first LCCS witness evaluations)
+/// - σ_{j,2} = ∑_{y∈{0,1}^s'} M_j(r'_x, y) · z_{1,2}(y) (second LCCS witness evaluations)
+/// - γ^j scales matrix j evaluation for first instance, γ^(t+j) for second instance
+/// - t is the number of matrices
+pub fn verify_target_sumcheck_for_lccs_folding<G1>(
+    gamma: &FpVar<G1::ScalarField>,
+    e1: &FpVar<G1::ScalarField>,
+    sigma1: &[FpVar<G1::ScalarField>], // σ_{j,1} for each matrix j for first LCCS instance
+    sigma2: &[FpVar<G1::ScalarField>], // σ_{j,2} for each matrix j for second LCCS instance
+    num_matrices: usize, // t
+) -> Result<FpVar<G1::ScalarField>, SynthesisError>
+where
+    G1: SWCurveConfig,
+    G1::BaseField: PrimeField,
+{
+    // Implementation computes: ∑_{j∈[t]} γ^j · e1 · σ_{j,1} + ∑_{j∈[t]} γ^(t+j) · e1 · σ_{j,2}
+}
+```
+
+#### CCS Folding Verifier Circuit (`circuit/ccs_verifier.rs`)
+
+```rust
+/// Gadget for verifying CCS folding with CycleFold
+pub struct CCSFoldingProofVerifierGadget;
+
+impl CCSFoldingProofVerifierGadget {
     /// Verify CCS folding in-circuit with secondary curve
+    /// Uses functions from circuit/sumcheck.rs for verification
     pub fn ccs_fold_verify<G1, C1, G2, C2>(
         ccs_proof: &CCSFoldProofVar,
         random_oracle: &mut RO,
@@ -291,15 +384,23 @@ impl MultiCCSProofVerifierGadget {
         commitment_W_proof: &secondary::ProofVar<G2, C2>,
         U_folded: &LCCSInstanceVar<G1, C1>,
     ) -> Result<(), Error> {
-        // Verify sumcheck and CycleFold operations
+        // 1. Use verify_all_sumcheck from circuit/sumcheck.rs
+        // 2. Use compute_equality_polynomial to compute e2 = eq(β, r'_x) 
+        // 3. Use verify_target_sumcheck_for_ccs_folding for final verification
+        // 4. Verify CycleFold operations for elliptic curve arithmetic
     }
 }
+```
 
+#### LCCS Folding Verifier Circuit (`circuit/lccs_verifier.rs`)
+
+```rust
 /// Gadget for verifying LCCS folding
-pub struct MultiLCCSProofVerifierGadget;
+pub struct LCCSFoldingProofVerifierGadget;
 
-impl MultiLCCSProofVerifierGadget {
+impl LCCSFoldingProofVerifierGadget {
     /// Verify LCCS folding in-circuit
+    /// Uses functions from circuit/sumcheck.rs for verification
     pub fn lccs_fold_verify<G, C: PolyCommitmentScheme<G>>(
         lccs_proof: &LCCSFoldProofVar,
         random_oracle: &mut RO,
@@ -307,7 +408,10 @@ impl MultiLCCSProofVerifierGadget {
         U2: &LCCSInstanceVar<G, C>,
         U_folded: &LCCSInstanceVar<G, C>,
     ) -> Result<(), Error> {
-        // Verify sumcheck and elliptic curve operations
+        // 1. Use verify_all_sumcheck from circuit/sumcheck.rs
+        // 2. Use compute_equality_polynomial to compute e1 = eq(r_x, r'_x)
+        // 3. Use verify_target_sumcheck_for_lccs_folding for final verification
+        // 4. Verify elliptic curve operations for instance folding
     }
 }
 
@@ -317,23 +421,27 @@ impl MultiLCCSProofVerifierGadget {
 
 ### Phase 1: Core CCS Polynomial Extension
 1. Extend `construct_css_polynomial` to handle two CCS instances simultaneously
-2. Implement `construct_combined_ccs_polynomial` for MultiCCSProof
+2. Implement `construct_combined_ccs_polynomial` for CCSFoldingProof
 3. Add utility functions for combining witness vectors from two instances
 
 ### Phase 2: Folding Protocols (Reusing linearization.rs)
-1. Implement `MultiCCSProof::prove_as_subprotocol` using existing linearization infrastructure:
+1. Implement `CCSFoldingProof::prove_as_subprotocol` using existing linearization infrastructure:
    - Use existing challenge sampling patterns
    - Reuse `MLSumcheck::prove_as_subprotocol` 
    - Reuse `compute_theta_values` for both instances
    - Reuse `fold_and_linearize_ccs` for final folding
-2. Implement `MultiCCSProof::verify_as_subprotocol` using existing verification patterns
-3. Implement `MultiLCCSProof` with similar reuse strategy
+2. Implement `CCSFoldingProof::verify_as_subprotocol` using existing verification patterns
+3. Implement `LCCSFoldingProof` with similar reuse strategy
 4. Integration and compatibility testing with existing CCS/LCCS structures
 
-### Phase 3: Circuit Gadgets (Leveraging existing patterns)
-1. Implement `SumcheckVerifierGadget` by adapting verification patterns from linearization.rs
-2. Implement `MultiLCCSProofVerifierGadget` for in-circuit LCCS verification  
-3. Implement `MultiCCSProofVerifierGadget` with CycleFold support
+### Phase 3: Circuit Gadgets (Moving and adapting from linearization_augmented_circuit.rs)
+1. Create `circuit/sumcheck.rs` with functions moved from `linearization_augmented_circuit.rs`:
+   - Move `verify_all_sumcheck` (complete sumcheck verification with challenge collection)
+   - Move `compute_equality_polynomial` (equality predicate computation)
+   - Implement `verify_target_sumcheck_for_ccs_folding` (CCS-specific target verification)
+   - Implement `verify_target_sumcheck_for_lccs_folding` (LCCS-specific target verification)
+2. Implement `LCCSFoldingProofVerifierGadget` for in-circuit LCCS verification using sumcheck.rs functions
+3. Implement `CCSFoldingProofVerifierGadget` with CycleFold support using sumcheck.rs functions
 
 ### Phase 4: Tree Integration and Testing
 1. Integrate with existing tree folding infrastructure
@@ -362,12 +470,12 @@ impl MultiLCCSProofVerifierGadget {
 
 #### 2. `nimfs.rs` - Multi-folding implementations
 **Tests to include:**
-- `MultiCCSProof::prove_as_subprotocol` and `MultiCCSProof::verify_as_subprotocol` correctness:
+- `CCSFoldingProof::prove_as_subprotocol` and `CCSFoldingProof::verify_as_subprotocol` correctness:
   - Construct two CCS instances of the cubic instances. Synthesize that the witness. Synthesize each of their witnesses. Then run `prove_as_subprotocol on these two CCS instances. fold them together. Then, run verify_as_subprotocol on the folded instances and ensure that it is correct
     - Construct two CCS instances of the SHA-256 instances from sequentialSha256.rs file. Synthesize each of their witnesses. Then ensure that the witnesses are coorect. Then run `prove_as_subprotocol on these two CCS instances. fold them together. Then, run verify_as_subprotocol on the folded instances and ensure that it is correct
-- `MultiLCCSProof::prove_as_subprotocol` and `MultiLCCSProof::verify_as_subprotocol` correctness:
-  - Construct four CCS instances of the cubic instances. Synthesize their witnesses. For the first two instances, fold them together via `MultiCCSProof::prove_as_subprotocol`. Then for the second instances, fold them together via `MultiCCSProof::prove_as_subprotocol`. Then, fold those folded instances together via  `MultiLCCSProof::prove_as_subprotocol`. Then, verify them via `MultiLCCSProof::verify_as_subprotocol`
-  - Construct four CCS instances of the sequential SHA-256 instances. Synthesize their witnesses. For the first two instances, fold them together via `MultiCCSProof::prove_as_subprotocol`. Then for the second instances, fold them together via `MultiCCSProof::prove_as_subprotocol`. Then, fold those folded instances together via  `MultiLCCSProof::prove_as_subprotocol`. Then, verify them via `MultiLCCSProof::verify_as_subprotocol`
+- `LCCSFoldingProof::prove_as_subprotocol` and `LCCSFoldingProof::verify_as_subprotocol` correctness:
+  - Construct four CCS instances of the cubic instances. Synthesize their witnesses. For the first two instances, fold them together via `CCSFoldingProof::prove_as_subprotocol`. Then for the second instances, fold them together via `CCSFoldingProof::prove_as_subprotocol`. Then, fold those folded instances together via  `LCCSFoldingProof::prove_as_subprotocol`. Then, verify them via `LCCSFoldingProof::verify_as_subprotocol`
+  - Construct four CCS instances of the sequential SHA-256 instances. Synthesize their witnesses. For the first two instances, fold them together via `CCSFoldingProof::prove_as_subprotocol`. Then for the second instances, fold them together via `CCSFoldingProof::prove_as_subprotocol`. Then, fold those folded instances together via  `LCCSFoldingProof::prove_as_subprotocol`. Then, verify them via `LCCSFoldingProof::verify_as_subprotocol`
 
 #### 3. `ccs_fold.rs` - CCS folding implementations (reusing linearization.rs)
 **Tests to include:**
@@ -380,28 +488,44 @@ impl MultiLCCSProofVerifierGadget {
   - Run full sumcheck protocol and verify correctness
 - Integration tests with existing linearization.rs functions:
   - Verify `compute_theta_values` works correctly with folding inputs
-  - Verify `fold_and_linearize_ccs` integration with MultiCCSProof output
+  - Verify `fold_and_linearize_ccs` integration with CCSFoldingProof output
 
 #### 4. `circuit/mod.rs` - Circuit module exports
 **Tests to include:**
 - Module integration
 
-#### 5. `circuit/sumcheck.rs` - Sumcheck verifier gadget (adapted from linearization.rs)
+#### 5. `circuit/sumcheck.rs` - Core sumcheck verification functions (moved from linearization_augmented_circuit.rs)
 **Tests to include:**
-- Test with cubic CCS instances folding:
-  - Create two cubic CCS instances, run `MultiCCSProof::prove_as_subprotocol`
-  - Construct circuit using `SumcheckVerifierGadget` adapted from linearization verification patterns  
-  - Verify the circuit can validate the sumcheck proof correctly
-- Test with sequential SHA256 CCS instances folding:
-  - Create two SHA256 CCS instances, run `MultiCCSProof::prove_as_subprotocol`
-  - Construct verification circuit and ensure witness generation succeeds
-  - Verify circuit constraints are satisfied
+- Test `verify_all_sumcheck` function:
+  - Setup CCS parameters for the computaions of cubic circuit, then compute the CCS instance-witness pairs for that matrix. Then, construct a sumcheck proof of it. Then, construct another circuit and construct the verification circuit of the sumcheck proof verification. Then, verify that the sumcheck proof verification circuit is satisified with the sumcheck proof
+  - Setup CCS parameters for the computaions of SHA-256 circuit, then compute the CCS instance-witness pairs for that matrix. Then, construct a sumcheck proof of it. Then, construct another circuit and construct the verification circuit of the sumcheck proof verification. Then, verify that the sumcheck proof verification circuit is satisified with the sumcheck proof
+  - Setup CCS parameters for the computaions of cubic circuit, then compute the CCS instance-witness pairs for that matrix. Setup g(x) that matches the folding lccs matrix done on lccs_fold.rs. Then, construct a sumcheck proof of it. Then, construct another circuit and construct the verification circuit of the sumcheck proof verification. Then, verify that the sumcheck proof verification circuit is satisified with the sumcheck proof
+    - Setup is basically like:
+    ```
+    let poly = construct_sumcheck_polynomial(shape, lccs1, lccs2, witness1, witness2, &gamma);
+
+    // 3. Run the sum-check protocol
+    let (sumcheck_proof, sumcheck_state) = MLSumcheck::prove_as_subprotocol(random_oracle, &poly);
+    ```
+    Make sure you import that construct_sumcheck_polynomial in lccs_fold.rs
+  - Do the same thing as above for SHA256 circuit
+- Test `verify_target_sumcheck_for_ccs_folding` function:
+  - Create two cubic CCS instances, run `CCSFoldingProof::prove_as_subprotocol` to get theta1 and theta2
+    - Compute e2 = eq(β, r'_x) using `compute_equality_polynomial`
+    - Verify target equality: c = γ^1 · e2 · ∑_{i=1}^q c_i · ∏_{j∈S_i} θ_{j,1} + γ^2 · e2 · ∑_{i=1}^q c_i · ∏_{j∈S_i} θ_{j,2}
+  - Test with SHA256 CCS instances for larger constraint systems
+- Test `verify_target_sumcheck_for_lccs_folding` function:
+  - Create four cubic CCS instances, fold first two and second two into LCCS instances
+    - Fold the two LCCS instances using `LCCSFoldingProof::prove_as_subprotocol` to get sigma1 and sigma2
+    - Compute e1 = eq(r_x, r'_x) using `compute_equality_polynomial`
+  - Verify target equality: c = ∑_{j∈[t]} γ^j · e1 · σ_{j,1} + ∑_{j∈[t]} γ^(t+j) · e1 · σ_{j,2}
+  - Test with SHA256 instances for comprehensive verification
 
 #### 6. `circuit/ccs_verifier.rs` - CCS folding verifier gadget  
 **Tests to include:**
-- Turn two cubic computations ito their CCS instance-witness pairs. Then construct the `MultiCCSProof::prove_as_subprotocol` for these two CCS instances. Then construct the verifier circuit for the verifying the proof using `ccs_fold_verify` on it. You would probably also need to run the sums of the elliptic curves on another circuit as well.
-- Turn two sequential SHA 256 computations ito their CCS instance-witness pairs. Then construct the `MultiCCSProof::prove_as_subprotocol` for these two CCS instances. Then construct the verifier circuit for the verifying the proof using `ccs_fold_verify` on it. Then run the circuit and ensure that you can generate the witness. Then, verify that the witnesses is fulfilled. You would probably also need to run the sums of the elliptic curves on the different circuit as well. Then, make sure that the circuit is folded correctly.
+- Turn two cubic computations ito their CCS instance-witness pairs. Then construct the `CCSFoldingProof::prove_as_subprotocol` for these two CCS instances. Then construct the verifier circuit for the verifying the proof using `ccs_fold_verify` on it. You would probably also need to run the sums of the elliptic curves on another circuit as well.
+- Turn two sequential SHA 256 computations ito their CCS instance-witness pairs. Then construct the `CCSFoldingProof::prove_as_subprotocol` for these two CCS instances. Then construct the verifier circuit for the verifying the proof using `ccs_fold_verify` on it. Then run the circuit and ensure that you can generate the witness. Then, verify that the witnesses is fulfilled. You would probably also need to run the sums of the elliptic curves on the different circuit as well. Then, make sure that the circuit is folded correctly.
 
 #### 7. `circuit/lccs_verifier.rs` - LCCS folding verifier gadget
 **Tests to include:**
-- Construct four CCS instances of the cubic instances. Synthesize their witnesses. For the first two instances, fold them together via `MultiCCSProof::prove_as_subprotocol`. Then for the second instances, fold them together via `MultiCCSProof::prove_as_subprotocol`. Then, fold those folded instances together via  `MultiLCCSProof::prove_as_subprotocol`. Then, construct the proof verifying it's correctness using `lccs_fold_verify`. Then run the circuit and ensure that you can generate the witness. Then, verify that the witnesses is fulfilled. You would probably also need to run the sums of the elliptic curves on the different circuit as well. Then, make sure that the circuit is folded correctly.
+- Construct four CCS instances of the cubic instances. Synthesize their witnesses. For the first two instances, fold them together via `CCSFoldingProof::prove_as_subprotocol`. Then for the second instances, fold them together via `CCSFoldingProof::prove_as_subprotocol`. Then, fold those folded instances together via `LCCSFoldingProof::prove_as_subprotocol` to get sigma1 and sigma2. Then, construct the proof verifying its correctness using `lccs_fold_verify` which uses `verify_target_sumcheck_for_lccs_folding` with the separate sigma1 and sigma2 vectors. Then run the circuit and ensure that you can generate the witness. Then, verify that the witnesses is fulfilled. You would probably also need to run the sums of the elliptic curves on the different circuit as well. Then, make sure that the circuit is folded correctly.
