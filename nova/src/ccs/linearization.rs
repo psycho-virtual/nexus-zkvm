@@ -24,7 +24,7 @@ use ark_crypto_primitives::sponge::{Absorb, CryptographicSponge};
 use ark_ec::{AdditiveGroup, CurveGroup};
 use ark_ff::{Field, PrimeField};
 use ark_r1cs_std::{alloc::AllocVar, fields::fp::FpVar};
-use ark_relations::r1cs::{ConstraintSystem, ConstraintSystemRef, SynthesisError, SynthesisMode};
+use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
 use ark_spartan::polycommitments::PolyCommitmentScheme;
 use tracing::instrument;
 
@@ -404,24 +404,7 @@ where
 
     // Step 5: Compute the theta values that are used for the target values vs. 
     // θ_j = Σ_{y∈{0,1}^s'} M_j(r'_x, y) · z(y) where j ∈ {1, ..., num_matrices}
-    let thetas = tracing::debug_span!(target: LOG_TARGET, "theta_computation", num_matrices = shape.num_matrices)
-        .in_scope(|| {
-            tracing::debug!("Computing theta values (matrix evaluations)");
-
-            let thetas: Vec<G::ScalarField> = (0..shape.num_matrices)
-                .map(|j| {
-                    let M_j_z = shape.Ms[j].multiply_vec(&z);
-                    vec_to_mle(M_j_z.as_slice()).evaluate::<G>(r_x.as_slice())
-                })
-                .collect();
-
-            tracing::debug!(
-                "Theta computation completed (computed {} theta values)",
-                thetas.len()
-            );
-
-            thetas
-        });
+    let thetas = compute_theta_values(shape, &z, &r_x);
 
     // Step 6: Build the LCCS instance
     let lccs_instance = tracing::debug_span!(target: LOG_TARGET, "lccs_instance_creation").in_scope(|| {
@@ -736,6 +719,207 @@ fn compute_equality_polynomial<G: CurveGroup>(
         .product();
 
     Ok(result)
+}
+
+/// Computes theta values for LCCS linearization
+///
+/// Computes θ_j = Σ_{y∈{0,1}^s'} M_j(r_x, y) · z(y) for j ∈ {0, ..., num_matrices-1}
+///
+/// These values represent the evaluation of each constraint matrix M_j applied to the witness vector z,
+/// then evaluated as a multilinear extension at the sumcheck evaluation point r_x.
+///
+/// # Arguments
+/// * `shape` - The CCS shape containing the constraint matrices
+/// * `z` - The witness vector (concatenation of public inputs X and witness W)
+/// * `r_x` - The evaluation point from the sumcheck protocol
+///
+/// # Returns
+/// * `Vec<G::ScalarField>` - The computed theta values, one for each matrix
+#[instrument(
+    target = LOG_TARGET,
+    level = "debug", 
+    skip(shape, z, r_x),
+    fields(
+        num_matrices = shape.num_matrices,
+        z_len = z.len(),
+        r_x_len = r_x.len()
+    )
+)]
+pub fn compute_theta_values<G: CurveGroup>(
+    shape: &CCSShape<G>,
+    z: &[G::ScalarField],
+    r_x: &[G::ScalarField],
+) -> Vec<G::ScalarField> {
+    tracing::debug!("Computing theta values (matrix evaluations)");
+
+    let thetas: Vec<G::ScalarField> = (0..shape.num_matrices)
+        .map(|j| {
+            let M_j_z = shape.Ms[j].multiply_vec(z);
+            vec_to_mle(M_j_z.as_slice()).evaluate::<G>(r_x)
+        })
+        .collect();
+
+    tracing::debug!(
+        "Theta computation completed (computed {} theta values)",
+        thetas.len()
+    );
+
+    thetas
+}
+
+/// Folds and linearizes two CCS instances into a single LCCS instance
+///
+/// This implements step 6-8 of the HyperNova folding protocol for CCS instances.
+/// The function samples a folding challenge ρ from the random oracle and combines
+/// the two CCS instances according to the specified folding rules.
+///
+/// # Protocol Steps:
+/// 1. Absorb theta values into the random oracle
+/// 2. Sample folding challenge ρ ← F
+/// 3. Fold commitments: C ← C₁ + ρ·C₂
+/// 4. Fold u values: u ← u₁ + ρ·u₂  
+/// 5. Fold x values: x ← x₁ + ρ·x₂
+/// 6. Fold v values: vⱼ ← θⱼ,₁ + ρ·θⱼ,₂
+/// 7. Fold witnesses: w ← w₁ + ρ·w₂
+///
+/// # Arguments
+/// * `ccs1` - First CCS instance to fold
+/// * `ccs2` - Second CCS instance to fold  
+/// * `witness1` - Witness for the first CCS instance
+/// * `witness2` - Witness for the second CCS instance
+/// * `thetas1` - Theta values for the first instance
+/// * `thetas2` - Theta values for the second instance
+/// * `merged_rs` - The evaluation point for the folded LCCS instance
+/// * `random_oracle` - Random oracle for sampling the folding challenge
+///
+/// # Returns
+/// * `(LCCSInstance<G, C>, CCSWitness<G>)` - The folded LCCS instance and witness
+#[instrument(
+    target = LOG_TARGET,
+    level = "debug",
+    skip(ccs1, ccs2, witness1, witness2, thetas1, thetas2, merged_rs, random_oracle),
+    fields(
+        ccs1_x_len = ccs1.X.len(),
+        ccs2_x_len = ccs2.X.len(),
+        thetas1_len = thetas1.len(),
+        thetas2_len = thetas2.len(),
+        merged_rs_len = merged_rs.len()
+    )
+)]
+pub fn fold_and_linearize_ccs<G, C, RO>(
+    shape: &CCSShape<G>,
+    ccs1: &CCSInstance<G, C>,
+    ccs2: &CCSInstance<G, C>,
+    witness1: &CCSWitness<G>,
+    witness2: &CCSWitness<G>,
+    thetas1: &[G::ScalarField],
+    thetas2: &[G::ScalarField],
+    merged_rs: &[G::ScalarField],
+    random_oracle: &mut RO,
+) -> Result<(LCCSInstance<G, C>, CCSWitness<G>), Error>
+where
+    G: CurveGroup,
+    G::ScalarField: PrimeField + Absorb,
+    C: PolyCommitmentScheme<G>,
+    RO: CryptographicSponge,
+{
+    tracing::debug!("Starting CCS folding and linearization");
+
+    // Validate input compatibility
+    if ccs1.X.len() != ccs2.X.len() {
+        return Err(Error::InvalidInputLength);
+    }
+    
+    if thetas1.len() != thetas2.len() {
+        return Err(Error::InvalidTargets);
+    }
+    
+    if thetas1.len() != shape.num_matrices {
+        return Err(Error::InvalidTargets);
+    }
+
+    if witness1.W.len() != witness2.W.len() {
+        return Err(Error::InvalidInputLength);
+    }
+
+    // Step 1: Absorb theta values into random oracle to sample ρ
+    tracing::debug_span!(target: LOG_TARGET, "challenge_sampling").in_scope(|| {
+        random_oracle.absorb(&thetas1);
+        random_oracle.absorb(&thetas2);
+        tracing::debug!("Absorbed theta values into random oracle");
+    });
+
+    // Step 2: Sample folding challenge ρ ← F
+    let rho: G::ScalarField = random_oracle.squeeze_field_elements(1)[0];
+    tracing::debug!("Sampled folding challenge ρ: {:?}", rho);
+
+    // Step 3: Fold commitments: C ← C₁ + ρ·C₂
+    let commitment_W = ccs1.commitment_W.clone() + ccs2.commitment_W.clone() * rho;
+    tracing::debug!("Folded commitments");
+
+    // Step 4: Fold u and x values
+    let (u_fold, x_fold) = tracing::debug_span!(target: LOG_TARGET, "input_folding").in_scope(|| {
+        // Extract u values (first element) and x values (rest)
+        let (u1, x1) = (&ccs1.X[0], &ccs1.X[1..]);
+        let (u2, x2) = (&ccs2.X[0], &ccs2.X[1..]);
+
+        // Fold u values: u ← u₁ + ρ·u₂
+        let u_fold = *u1 + rho * u2;
+
+        // Fold x values: x ← x₁ + ρ·x₂
+        let x_fold: Vec<G::ScalarField> = x1
+            .iter()
+            .zip(x2.iter())
+            .map(|(a, b)| *a + rho * b)
+            .collect();
+
+        tracing::debug!("Folded u and x values (u_fold: {:?})", u_fold);
+        
+        (u_fold, x_fold)
+    });
+
+    // Step 5: Fold v values: vⱼ ← θⱼ,₁ + ρ·θⱼ,₂  
+    let vs: Vec<G::ScalarField> = tracing::debug_span!(target: LOG_TARGET, "theta_folding").in_scope(|| {
+        let vs : Vec<G::ScalarField> = thetas1
+            .iter()
+            .zip(thetas2.iter())
+            .map(|(theta1, theta2)| *theta1 + rho * theta2)
+            .collect();
+
+        tracing::debug!("Folded {} theta values into vs", vs.len());
+        vs
+    });
+
+    // Step 6: Create the folded LCCS instance
+    let lccs_instance = tracing::debug_span!(target: LOG_TARGET, "lccs_creation").in_scope(|| {
+        let X = [vec![u_fold], x_fold].concat();
+        
+        let lccs_instance = LCCSInstance::new(shape, &commitment_W, &X, merged_rs, &vs)?;
+        
+        tracing::debug!("Created folded LCCS instance");
+        Ok::<_, Error>(lccs_instance)
+    })?;
+
+    // Step 7: Fold witnesses: w ← w₁ + ρ·w₂
+    let folded_witness = tracing::debug_span!(target: LOG_TARGET, "witness_folding").in_scope(|| {
+        let folded_W: Vec<G::ScalarField> = witness1
+            .W
+            .iter()
+            .zip(witness2.W.iter())
+            .map(|(w1, w2)| *w1 + rho * w2)
+            .collect();
+
+        let folded_witness = CCSWitness::new(shape, &folded_W)?;
+        
+        tracing::debug!("Folded witness (length: {})", folded_W.len());
+        Ok::<_, Error>(folded_witness)
+    })?;
+
+    tracing::info!("✅ CCS folding and linearization completed");
+    tracing::debug!("Final LCCS instance vs length: {}", lccs_instance.vs.len());
+    tracing::debug!("Final LCCS instance rs length: {}", lccs_instance.rs.len());
+
+    Ok((lccs_instance, folded_witness))
 }
 
 // Convert SynthesisError to our Error type
