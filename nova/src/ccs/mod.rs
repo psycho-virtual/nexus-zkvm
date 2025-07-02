@@ -21,6 +21,7 @@ use mle::vec_to_mle;
 pub mod mle;
 pub mod lccs_fold;
 pub mod linearization;
+pub mod ccs_fold;
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum Error {

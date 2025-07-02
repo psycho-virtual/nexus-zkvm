@@ -436,7 +436,7 @@ where
     })?;
 
     // Compute e₂ = eq(β, r'ₓ) for verification purposes
-    let e2 = compute_equality_polynomial::<G>(&beta, &r_x)?;
+    let _e2 = compute_equality_polynomial::<G>(&beta, &r_x)?;
 
     tracing::info!("✅ CCS to LCCS linearization completed");
 
@@ -446,7 +446,7 @@ where
         sumcheck_proof,
         gamma,
         beta,
-        sumcheck_rounds: sumcheck_rounds,
+        sumcheck_rounds,
     })
 }
 
@@ -938,7 +938,7 @@ mod tests {
     use ark_crypto_primitives::sponge::poseidon::PoseidonSponge;
     use ark_ff::{Field, PrimeField};
     use ark_r1cs_std::fields::{fp::FpVar, FieldVar};
-    use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
+    use ark_relations::r1cs::{ConstraintSystem, ConstraintSystemRef, SynthesisError};
     use ark_spartan::polycommitments::PCSKeys;
     use ark_std::{marker::PhantomData, test_rng};
     use tracing_subscriber::{
