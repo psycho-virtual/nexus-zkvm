@@ -186,7 +186,6 @@ impl<G: CurveGroup> MultiCCSProof<G> {
     where
         G::ScalarField: PrimeField + Absorb,
     {
-
         // Step 1: Regenerate challenges (same as verification in linearization.rs)
         let (gamma, beta) = tracing::debug_span!(target: LOG_TARGET, "challenge_regeneration")
             .in_scope(|| {
@@ -282,7 +281,7 @@ impl<G: CurveGroup> MultiCCSProof<G> {
         beta_len = beta.len()
     )
 )]
-fn construct_combined_ccs_polynomial<G: CurveGroup>(
+pub fn construct_combined_ccs_polynomial<G: CurveGroup>(
     shape: &CCSShape<G>,
     z1: &[G::ScalarField],
     z2: &[G::ScalarField],

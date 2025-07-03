@@ -1,5 +1,5 @@
 //! Parallel Tree Folding Example
-//! 
+//!
 //! This example demonstrates tree folding using HypernovaFoldReducer
 //! with 64 leaf nodes and parallel preprocessing. It processes actual SHA-256
 //! operations in a binary tree structure.
@@ -12,16 +12,17 @@
 //!
 //! Run with: cargo run --example parallel_tree_fold_example --release
 
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::thread;
-use std::time::{Instant};
-use std::marker::PhantomData;
+use std::time::Instant;
 
 use ark_bn254::{Bn254, Fr as BN254Fr, G1Projective as BN254G1};
 use ark_crypto_primitives::sponge::poseidon::PoseidonSponge;
 use ark_crypto_primitives::sponge::CryptographicSponge;
-use ark_std::{test_rng, start_timer, end_timer};
+use ark_std::{end_timer, start_timer, test_rng};
 use hex;
+use nexus_nova::tree_folding::hypernova_fold_reducer::HypernovaFoldReducer;
 use tracing;
 
 // Additional imports for FastTestCircuit
@@ -31,14 +32,11 @@ use ark_r1cs_std::fields::FieldVar;
 use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
 
 // Nova imports
+use nexus_nova::ccs::linearization::{setup_linearization, StepFunctionInput};
 use nexus_nova::circuits::nova::StepCircuit;
-use nexus_nova::ccs::linearization::{StepFunctionInput, setup_linearization};
 use nexus_nova::poseidon_config;
-use nexus_nova::provider::zeromorph::{Zeromorph, PolyCommitmentScheme};
-use nexus_nova::tree_folding::hypernova_fold_reducer::HypernovaFoldReducer;
-use nexus_nova::tree_folding::fold_reducer::FoldReducer;
+use nexus_nova::provider::zeromorph::{PolyCommitmentScheme, Zeromorph};
 use nexus_nova::tree_folding::circuit::sha256::{calculate_sha256_native, conversions};
-use nexus_nova::tree_folding::circuit::sequential_sha256::SequentialSha256Circuit;
 
 // Type aliases for convenience - using BN254 (same as used in production)
 type G1 = BN254G1;
@@ -51,7 +49,7 @@ type PCKey = <Z as nexus_nova::provider::zeromorph::PolyCommitmentScheme<G1>>::P
 // Initialize tracing for the example respecting RUST_LOG environment variable
 fn init_tracing() {
     use tracing::Level;
-    
+
     // Check RUST_LOG environment variable and determine max level
     let max_level = match std::env::var("RUST_LOG") {
         Ok(level_str) => {
@@ -65,7 +63,7 @@ fn init_tracing() {
         }
         Err(_) => Level::INFO, // Default to INFO if RUST_LOG is not set
     };
-    
+
     tracing_subscriber::fmt()
         .with_max_level(max_level)
         .with_target(true)
@@ -115,7 +113,10 @@ fn generate_test_inputs(count: usize) -> Vec<StepFunctionInput<CF>> {
 }
 
 /// Process a batch of messages in parallel using multiple threads
-fn process_messages_parallel(messages: Vec<Vec<u8>>, num_threads: usize) -> Vec<StepFunctionInput<CF>> {
+fn process_messages_parallel(
+    messages: Vec<Vec<u8>>,
+    num_threads: usize,
+) -> Vec<StepFunctionInput<CF>> {
     let span = tracing::info_span!(
         "process_messages_parallel",
         num_messages = messages.len(),
@@ -125,24 +126,34 @@ fn process_messages_parallel(messages: Vec<Vec<u8>>, num_threads: usize) -> Vec<
 
     let num_messages = messages.len();
     let chunk_size = (num_messages + num_threads - 1) / num_threads; // Ceiling division
-    
+
     let messages_arc = Arc::new(messages);
     let mut handles = vec![];
-    
-    tracing::info!("Processing {} messages using {} threads (chunk size: {})", num_messages, num_threads, chunk_size);
-    
+
+    tracing::info!(
+        "Processing {} messages using {} threads (chunk size: {})",
+        num_messages,
+        num_threads,
+        chunk_size
+    );
+
     // Spawn worker threads
     for thread_id in 0..num_threads {
         let messages_clone = Arc::clone(&messages_arc);
         let start_idx = thread_id * chunk_size;
         let end_idx = ((thread_id + 1) * chunk_size).min(num_messages);
-        
+
         if start_idx >= num_messages {
             break; // No more work for this thread
         }
-        
-        tracing::info!("🧵 Spawning worker thread {} for range {}..{}", thread_id, start_idx, end_idx);
-        
+
+        tracing::info!(
+            "🧵 Spawning worker thread {} for range {}..{}",
+            thread_id,
+            start_idx,
+            end_idx
+        );
+
         let handle = thread::Builder::new()
             .name(format!("worker-{}", thread_id))
             .spawn(move || {
@@ -154,10 +165,14 @@ fn process_messages_parallel(messages: Vec<Vec<u8>>, num_threads: usize) -> Vec<
                 );
                 let _worker_enter = worker_span.enter();
 
-                tracing::info!("🚀 Worker thread {} started, processing {} items", thread_id, end_idx - start_idx);
-                
+                tracing::info!(
+                    "🚀 Worker thread {} started, processing {} items",
+                    thread_id,
+                    end_idx - start_idx
+                );
+
                 let mut results = Vec::new();
-                
+
                 for i in start_idx..end_idx {
                     let process_span = tracing::debug_span!(
                         "process_message",
@@ -167,50 +182,77 @@ fn process_messages_parallel(messages: Vec<Vec<u8>>, num_threads: usize) -> Vec<
                     let _process_enter = process_span.enter();
 
                     let start_time = Instant::now();
-                    
+
                     // Calculate actual SHA-256 hash
                     let hash_bytes = calculate_sha256_native(&messages_clone[i]);
-                    
+
                     // Convert hash to field element for the SHA-256 circuit
                     let hash_field = conversions::bytes_to_field::<CF>(&hash_bytes);
-                    
+
                     let process_time = start_time.elapsed();
-                    
-                    tracing::info!("📄 Worker {}: Leaf {}: Message = \"{}\" (processed in {:?})", thread_id, i, String::from_utf8_lossy(&messages_clone[i]), process_time);
-                    tracing::debug!("🔐 Worker {}: Leaf {}: SHA-256 hash = {}", thread_id, i, hex::encode(&hash_bytes));
-                    tracing::debug!("🔢 Worker {}: Leaf {}: Hash as field = {}", thread_id, i, hash_field);
-                    
+
+                    tracing::info!(
+                        "📄 Worker {}: Leaf {}: Message = \"{}\" (processed in {:?})",
+                        thread_id,
+                        i,
+                        String::from_utf8_lossy(&messages_clone[i]),
+                        process_time
+                    );
+                    tracing::debug!(
+                        "🔐 Worker {}: Leaf {}: SHA-256 hash = {}",
+                        thread_id,
+                        i,
+                        hex::encode(&hash_bytes)
+                    );
+                    tracing::debug!(
+                        "🔢 Worker {}: Leaf {}: Hash as field = {}",
+                        thread_id,
+                        i,
+                        hash_field
+                    );
+
                     let step_input = StepFunctionInput {
                         i: CF::from(i as u64),
                         z_i: vec![hash_field], // SequentialSha256Circuit has ARITY = 1
                     };
                     results.push((i, step_input));
                 }
-                
-                tracing::info!("✅ Worker thread {} completed, processed {} items", thread_id, results.len());
-                
+
+                tracing::info!(
+                    "✅ Worker thread {} completed, processed {} items",
+                    thread_id,
+                    results.len()
+                );
+
                 results
             })
             .expect("Failed to spawn worker thread");
-        
+
         handles.push(handle);
     }
-    
-    tracing::info!("⏳ Waiting for {} worker threads to complete...", handles.len());
-    
+
+    tracing::info!(
+        "⏳ Waiting for {} worker threads to complete...",
+        handles.len()
+    );
+
     // Collect results from all threads and sort by original index
     let mut all_results = Vec::new();
     for (thread_idx, handle) in handles.into_iter().enumerate() {
         let thread_results = handle.join().expect("Thread panicked");
-        tracing::info!("📥 Collected {} results from worker thread {}", thread_results.len(), thread_idx);
+        tracing::info!(
+            "📥 Collected {} results from worker thread {}",
+            thread_results.len(),
+            thread_idx
+        );
         all_results.extend(thread_results);
     }
-    
+
     // Sort by original index to maintain order
     all_results.sort_by_key(|(idx, _)| *idx);
-    
+
     tracing::info!("🔄 Sorted {} results by original index", all_results.len());
-    
+
     // Extract just the StepFunctionInput values
     all_results.into_iter().map(|(_, input)| input).collect()
 }
@@ -220,17 +262,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _main_enter = main_span.enter();
 
     init_tracing();
-    
+
     let circuit_name = "Fast Test Circuit (x^3 + x + 5)";
     let computation_type = "cubic polynomial operations";
-    
-    tracing::info!("🚀 Starting Parallel Tree Folding Example with {}", circuit_name);
+
+    tracing::info!(
+        "🚀 Starting Parallel Tree Folding Example with {}",
+        circuit_name
+    );
     tracing::info!("📊 Configuration:");
     tracing::info!("    • Leaf nodes: 64 (2^6, power of 2 for binary folding)");
     tracing::info!("    • Circuit: {} - {}", circuit_name, computation_type);
     tracing::info!("    • Folding: Sequential binary tree using FoldDriver");
     tracing::info!("💡 Using fast test circuit for rapid development and testing");
-    
+
     // Setup environment
     let (ck, ro_config) = {
         let setup_span = tracing::info_span!("setup_environment", srs_degree = 12);
@@ -243,39 +288,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("✅ Cryptographic environment setup completed");
         result
     };
-    
+
     // Create the test circuit
     let linearization_params = {
         let circuit_span = tracing::info_span!("circuit_setup", circuit_name = circuit_name);
         let _circuit_enter = circuit_span.enter();
 
         tracing::info!("🔧 Creating {} instance...", circuit_name);
-        
+
         let setup_timer = start_timer!(|| format!("{} reducer setup", circuit_name));
         let start_setup_time = Instant::now();
-        
+
         tracing::info!("Setting up fast test circuit (should take seconds)...");
-        let linearization_params = setup_linearization(FastTestCircuit::<CF> { _phantom: PhantomData })?;
-        
+        let linearization_params =
+            setup_linearization(FastTestCircuit::<CF> { _phantom: PhantomData })?;
+
         let setup_time = start_setup_time.elapsed();
         end_timer!(setup_timer);
-        tracing::info!("✅ {} linearization completed in {:?}", circuit_name, setup_time);
-        
+        tracing::info!(
+            "✅ {} linearization completed in {:?}",
+            circuit_name,
+            setup_time
+        );
+
         linearization_params
     };
-    
+
     // Create the reducer
     tracing::debug!("Creating HypernovaFoldReducer instance...");
-    let reducer = HypernovaFoldReducer::<G1, Z, _, RO>::new(
-        linearization_params,
-        &ck,
-        &ro_config,
-    );
+    let reducer = HypernovaFoldReducer::<G1, Z, _, RO>::new(linearization_params, &ck, &ro_config);
     tracing::info!("✅ HypernovaFoldReducer created successfully");
-    
+
     // Generate sample inputs
     const NUM_LEAVES: usize = 64; // Must be power of 2 for binary folding (2^6 = 64)
-    
+
     let step_inputs = {
         let input_span = tracing::info_span!("input_generation", num_leaves = NUM_LEAVES);
         let _input_enter = input_span.enter();
@@ -294,11 +340,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("    • Leaf nodes: {}", NUM_LEAVES);
     tracing::info!("    • Test inputs generated: {}", step_inputs.len());
     tracing::info!("    • Reducer created successfully");
-    
+
     tracing::info!("🎉 Parallel Tree Folding Example completed successfully!");
     tracing::info!("💡 This demonstrates the setup for parallel preprocessing with sequential binary tree folding");
     tracing::info!("💡 The reducer is ready for actual tree folding operations");
-    
+
     Ok(())
 }
 
@@ -309,9 +355,9 @@ fn setup_environment_with_degree(srs_degree: usize) -> (PCKey, ROConfig) {
 
     let timer = start_timer!(|| "Setting up environment");
     let mut rng = test_rng();
-    
+
     tracing::debug!("🔧 Setting up SRS with degree {}...", srs_degree);
-    
+
     // Setup SRS for Zeromorph
     let ck = {
         let srs_span = tracing::debug_span!("srs_setup_and_trim", degree = srs_degree);
@@ -321,9 +367,9 @@ fn setup_environment_with_degree(srs_degree: usize) -> (PCKey, ROConfig) {
         let srs = Z::setup(srs_degree, b"parallel-tree-fold-example", &mut rng)
             .expect("Failed to set up SRS");
         end_timer!(srs_timer);
-        
+
         tracing::debug!("✂️  SRS setup completed, trimming...");
-            
+
         // Trim SRS to get commitment key
         let trim_timer = start_timer!(|| "SRS trimming");
         let ck = Z::trim(&srs, srs_degree - 1).ck;
@@ -331,54 +377,58 @@ fn setup_environment_with_degree(srs_degree: usize) -> (PCKey, ROConfig) {
 
         ck
     };
-    
+
     tracing::debug!("🎲 Setting up random oracle config...");
-    
+
     // Setup random oracle
     let ro_config = poseidon_config::<CF>();
-    
+
     end_timer!(timer);
-    
+
     tracing::debug!("✅ Environment setup complete");
-    
+
     (ck, ro_config)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_sample_message_generation() {
         let messages = generate_test_inputs(64);
         assert_eq!(messages.len(), 64);
-        
+
         // Verify all messages are different
         for i in 0..messages.len() {
             for j in (i + 1)..messages.len() {
-                assert_ne!(messages[i], messages[j], "Messages {} and {} should be different", i, j);
+                assert_ne!(
+                    messages[i], messages[j],
+                    "Messages {} and {} should be different",
+                    i, j
+                );
             }
         }
     }
-    
+
     #[test]
     fn test_sequential_sha256_circuit() {
         let circuit = SequentialSha256Circuit::<CF>::new();
         assert_eq!(SequentialSha256Circuit::<CF>::ARITY, 1);
-        
+
         // The circuit should be createable and have the right arity
         // Actual constraint generation testing would require a full R1CS setup
     }
-    
+
     #[test]
     fn test_parallel_processing() {
         let messages = generate_test_inputs(8);
         let step_inputs = process_messages_parallel(messages, 2);
         assert_eq!(step_inputs.len(), 8);
-        
+
         // Verify that inputs are ordered correctly
         for (i, input) in step_inputs.iter().enumerate() {
             assert_eq!(input.i, CF::from(i as u64));
         }
     }
-} 
+}

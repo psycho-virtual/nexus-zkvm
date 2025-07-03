@@ -19,6 +19,7 @@ use crate::{
     circuits::nova::StepCircuit,
     folding::hypernova::ml_sumcheck::{ListOfProductsOfPolynomials, MLSumcheck},
     safe_loglike,
+    tree_folding::circuit::sumcheck::compute_equality_polynomial_native,
 };
 use ark_crypto_primitives::sponge::{Absorb, CryptographicSponge};
 use ark_ec::{AdditiveGroup, CurveGroup};
@@ -436,7 +437,7 @@ where
     })?;
 
     // Compute e₂ = eq(β, r'ₓ) for verification purposes
-    let _e2 = compute_equality_polynomial::<G>(&beta, &r_x)?;
+    let _e2 = compute_equality_polynomial_native::<G>(&beta, &r_x)?;
 
     tracing::info!("✅ CCS to LCCS linearization completed");
 
@@ -617,7 +618,7 @@ where
 
         // Step 3: Compute and verify e₂ = eq(β, r'ₓ) matches stored value
         let e2 = tracing::debug_span!(target: LOG_TARGET, "equality_polynomial_verification").in_scope(|| {
-            let recomputed_e2 = compute_equality_polynomial::<G>(&beta, &r_x)?;
+            let recomputed_e2 = compute_equality_polynomial_native::<G>(&beta, &r_x)?;
 
             tracing::debug!("e₂ verification passed: {:?}", recomputed_e2);
 
@@ -694,32 +695,7 @@ where
     })
 }
 
-/// Computes the equality polynomial eq(a, b) = ∏ᵢ [aᵢ·bᵢ + (1-aᵢ)·(1-bᵢ)]
-///
-/// This is a fundamental building block that computes the multilinear extension
-/// of the equality predicate over boolean vectors.
-fn compute_equality_polynomial<G: CurveGroup>(
-    a: &[G::ScalarField],
-    b: &[G::ScalarField],
-) -> Result<G::ScalarField, Error> {
-    if a.len() != b.len() {
-        return Err(Error::NotSatisfied);
-    }
 
-    let result: G::ScalarField = a
-        .iter()
-        .zip(b.iter())
-        .map(|(ai, bi)| {
-            // Compute aᵢ·bᵢ + (1-aᵢ)·(1-bᵢ)
-            // = aᵢ·bᵢ + 1 - aᵢ - bᵢ + aᵢ·bᵢ
-            // = 2·aᵢ·bᵢ - aᵢ - bᵢ + 1
-            let ai_bi = *ai * bi;
-            ai_bi + ai_bi - ai - bi + G::ScalarField::ONE
-        })
-        .product();
-
-    Ok(result)
-}
 
 /// Computes theta values for LCCS linearization
 ///

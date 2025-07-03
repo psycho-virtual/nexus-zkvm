@@ -21,12 +21,11 @@ use ark_r1cs_std::{
 use ark_relations::r1cs::{Namespace, SynthesisError};
 use ark_std::marker::PhantomData;
 use ark_std::ops::Neg;
-use ark_std::Zero;
 use std::{borrow::Borrow, fmt::Debug};
 
 use crate::{
     ccs::linearization::LCCSLinearization,
-    folding::hypernova::ml_sumcheck::protocol::verifier::SQUEEZE_NATIVE_ELEMENTS_NUM,
+    tree_folding::circuit::sumcheck::{compute_equality_polynomial, verify_all_sumcheck},
 };
 use ark_spartan::polycommitments::PolyCommitmentScheme;
 use tracing::instrument;
@@ -419,7 +418,7 @@ where
 /// # Returns
 ///
 /// Returns a tuple containing:
-/// - `gamma`: Challenge for combining polynomial evaluations  
+/// - `gamma`: Challenge for combining polynomial evaluations
 /// - `beta`: Vector of challenges for equality polynomial evaluation
 #[instrument(
     level = "debug",
@@ -443,234 +442,6 @@ where
     let beta = random_oracle.squeeze_field_elements(sumcheck_rounds)?;
 
     Ok((gamma, beta))
-}
-
-/// Verify all sumcheck rounds and collect challenges.
-///
-/// This function performs the complete sumcheck verification process:
-/// 1. Uses the provided expected sum as the initial value for verification
-/// 2. Iterates through all sumcheck proof rounds, performing the following for each:
-///    - Absorbs polynomial evaluations from the prover message
-///    - Generates and absorbs the verifier challenge r_k
-///    - Verifies round consistency: p_k(0) + p_k(1) = p_{k-1}(r_{k-1})
-///    - Computes the next expected value via Lagrange interpolation
-///    - Collects the challenge points for final verification
-///
-/// # Arguments
-///
-/// * `random_oracle` - The cryptographic sponge for challenge generation
-/// * `sumcheck_evals` - The polynomial evaluations for each round
-/// * `expected_sum_of_polynomial` - The expected initial sum to verify against
-/// * `sumcheck_rounds` - Number of sumcheck rounds to process
-///
-/// # Returns
-///
-/// Returns a tuple containing:
-/// - The final expected value after all rounds
-/// - Vector of challenge points r_k from each round
-#[instrument(
-    level = "debug",
-    skip(random_oracle, sumcheck_evals),
-    fields(
-        sumcheck_rounds = sumcheck_rounds,
-        num_eval_rounds = sumcheck_evals.len(),
-    )
-)]
-fn verify_all_sumcheck<G1, RO>(
-    random_oracle: &mut RO::Var,
-    sumcheck_evals: &[Vec<FpVar<G1::ScalarField>>],
-    expected_sum_of_polynomial: FpVar<G1::ScalarField>,
-    sumcheck_rounds: usize,
-) -> Result<(FpVar<G1::ScalarField>, Vec<FpVar<G1::ScalarField>>), SynthesisError>
-where
-    G1: SWCurveConfig,
-    G1::BaseField: PrimeField,
-    RO: SpongeWithGadget<G1::ScalarField>,
-    RO::Var: CryptographicSpongeVar<G1::ScalarField, RO, Parameters = RO::Config>,
-{
-    // Start with the provided expected sum as the initial expected value
-    let mut expected = expected_sum_of_polynomial;
-
-    let mut rs_p: Vec<FpVar<G1::ScalarField>> = Vec::with_capacity(sumcheck_rounds);
-
-    for round in 0..sumcheck_rounds {
-        tracing::debug!(target: LOG_TARGET, "🔍 Starting sumcheck round {}", round);
-
-        // Absorb polynomial evaluations (the prover message)
-        let evals = &sumcheck_evals[round];
-
-        random_oracle.absorb(evals).map_err(|e| {
-            tracing::error!(target: LOG_TARGET, "🔍 Error absorbing evals in round {}: {:?}", round, e);
-            e
-        })?;
-
-        // Fetch verifier challenge r_k and immediately absorb it per spec.
-        let r_k = random_oracle
-            .squeeze_field_elements(SQUEEZE_NATIVE_ELEMENTS_NUM)
-            .map_err(|e| {
-                tracing::error!(target: LOG_TARGET, "🔍 Error squeezing r_k in round {}: {:?}", round, e);
-                e
-            })?[0]
-            .clone();
-
-        tracing::debug!("🔍 Round {} r_k: {:?}", round, r_k.value());
-
-        random_oracle.absorb(&r_k).map_err(|e| {
-            tracing::error!(target: LOG_TARGET, "🔍 Error absorbing r_k in round {}: {:?}", round, e);
-            e
-        })?;
-
-        // Enforce p_k(0) + p_k(1) = p_{k-1}(r_{k-1}) and derive the next
-        // expected value via Lagrange interpolation.
-        expected = verify_sumcheck_round::<G1>(round, &expected, evals, &r_k).map_err(|e| {
-            tracing::error!(target: LOG_TARGET, "🔍 Error in verify_sumcheck_round {}: {:?}", round, e);
-            e
-        })?;
-
-        tracing::debug!(target: LOG_TARGET, "🔍 Round {} expected after: {:?}", round, expected.value());
-
-        rs_p.push(r_k);
-    }
-
-    Ok((expected, rs_p))
-}
-
-/// Verify a single round of the sumcheck protocol.
-///
-/// For each round k, this verifies that p_k(0) + p_k(1) = p_{k-1}(r_{k-1})
-/// and performs Lagrange interpolation to evaluate the polynomial at the challenge point.
-///
-/// # Arguments
-///
-/// * `round` - The current round number
-/// * `expected` - The expected evaluation from the previous round (p_{k-1}(r_{k-1}))
-/// * `evals` - The polynomial evaluations [p_k(0), p_k(1), p_k(2), p_k(3)] for this round
-/// * `r` - The verifier challenge r_k for this round
-///
-/// # Returns
-///
-/// The evaluation p_k(r_k) of the interpolated polynomial at the challenge point r_k.
-fn verify_sumcheck_round<G1>(
-    round: usize,
-    expected: &FpVar<G1::ScalarField>,
-    evals: &[FpVar<G1::ScalarField>],
-    r: &FpVar<G1::ScalarField>,
-) -> Result<FpVar<G1::ScalarField>, SynthesisError>
-where
-    G1: SWCurveConfig,
-    G1::BaseField: PrimeField,
-{
-    tracing::debug!(
-        target: LOG_TARGET,
-        "🔍 verify_sumcheck_round round={}, r={:?}, expected={:?}, evals={:?}",
-        round,
-        r.value(),
-        expected.value(),
-        evals.iter().map(|e| e.value()).collect::<Vec<_>>()
-    );
-
-    // Enforce the consistency condition p_k(0) + p_k(1) = p_{k-1}(r_{k-1})
-    expected
-        .enforce_equal(&(&evals[0] + &evals[1]))
-        .map_err(|e| {
-            tracing::error!("🔍 Error in consistency check: {:?}", e);
-            e
-        })?;
-
-    // Constants used for degree-two Lagrange interpolation over points 0,1,2,3.
-    let interpolation_constants = [
-        (G1::ScalarField::from(0u64), G1::ScalarField::from(-6i64)),
-        (G1::ScalarField::from(1u64), G1::ScalarField::from(2i64)),
-        (G1::ScalarField::from(2u64), G1::ScalarField::from(-2i64)),
-        (G1::ScalarField::from(3u64), G1::ScalarField::from(6i64)),
-    ];
-
-    // Compute  Π_j (x - j)
-    let prod: FpVar<G1::ScalarField> = (0..(MAX_CARDINALITY + 2)).fold(
-        FpVar::<G1::ScalarField>::Constant(G1::ScalarField::ONE),
-        |acc, idx| acc * (r - interpolation_constants[idx].0),
-    );
-
-    tracing::debug!("🔍 prod value: {:?}", prod.value());
-
-    // Evaluate the polynomial at point r using the barycentric form.
-    let next_expected: FpVar<G1::ScalarField> = (0..(MAX_CARDINALITY + 2))
-        .map(|i| {
-            let num = &prod * &evals[i];
-            let denom = (r - interpolation_constants[i].0) * interpolation_constants[i].1;
-
-            tracing::debug!(
-                "🔍 Lagrange term {}: num={:?}, denom={:?}",
-                i,
-                num.value(),
-                denom.value()
-            );
-
-            // Check if denominator is zero before calling mul_by_inverse
-            match denom.value() {
-                Ok(denom_val) if denom_val.is_zero() => {
-                    tracing::error!(
-                        "🔍 Division by zero detected at Lagrange term {}, r={:?}, interpolation_point={:?}",
-                        i,
-                        r.value(),
-                        interpolation_constants[i].0
-                    );
-                    return Err(SynthesisError::AssignmentMissing);
-                }
-                _ => {}
-            }
-
-            num.mul_by_inverse(&denom).map_err(|e| {
-                tracing::error!("🔍 Error in mul_by_inverse for term {}: {:?}", i, e);
-                e
-            })
-        })
-        .collect::<Result<Vec<FpVar<G1::ScalarField>>, SynthesisError>>()?
-        .iter()
-        .sum();
-
-    tracing::debug!("🔍 next_expected value: {:?}", next_expected.value());
-
-    Ok(next_expected)
-}
-
-/// Compute the equality polynomial eq(a, b) = ∏ᵢ [aᵢ·bᵢ + (1-aᵢ)·(1-bᵢ)]
-///
-/// This is a fundamental building block for sumcheck verification that computes
-/// the multilinear extension of the equality predicate.
-///
-/// # Arguments
-///
-/// * `a` - First vector of field elements
-/// * `b` - Second vector of field elements
-///
-/// # Returns
-///
-/// Returns the evaluation of the equality polynomial eq(a,b).
-#[inline]
-fn compute_equality_polynomial<G1>(
-    a: &[FpVar<G1::ScalarField>],
-    b: &[FpVar<G1::ScalarField>],
-) -> Result<FpVar<G1::ScalarField>, SynthesisError>
-where
-    G1: SWCurveConfig,
-    G1::BaseField: PrimeField,
-{
-    assert_eq!(a.len(), b.len());
-
-    let one = FpVar::<G1::ScalarField>::Constant(G1::ScalarField::ONE);
-
-    let result = a
-        .iter()
-        .zip(b.iter())
-        .map(|(ai, bi)| {
-            let term1 = ai * bi; // a_i * b_i
-            let term2 = (one.clone() - ai) * (one.clone() - bi); // (1-a_i)*(1-b_i)
-            term1 + term2
-        })
-        .fold(one.clone(), |acc, x| acc * x);
-
-    Ok(result)
 }
 
 #[cfg(test)]
@@ -755,35 +526,6 @@ mod tests {
     }
 
     #[test]
-    fn test_sumcheck_round_verification() {
-        let _guard = setup_test_tracing();
-
-        let cs = ConstraintSystem::<Fr>::new_ref();
-        let mut rng = test_rng();
-
-        // Create mock polynomial evaluations at points 0, 1, 2, 3
-        let evals: Vec<FpVar<Fr>> = (0..MAX_CARDINALITY + 2)
-            .map(|_| FpVar::new_witness(cs.clone(), || Ok(Fr::rand(&mut rng))))
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-
-        // Create expected value (should equal evals[0] + evals[1])
-        let expected = &evals[0] + &evals[1];
-
-        // Create random challenge point
-        let r = FpVar::new_witness(cs.clone(), || Ok(Fr::rand(&mut rng))).unwrap();
-
-        // Run sumcheck round verification
-        let _result =
-            verify_sumcheck_round::<ark_bn254::g1::Config>(0, &expected, &evals, &r).unwrap();
-
-        // Verify constraint system is satisfied
-        assert!(cs.is_satisfied().unwrap());
-
-        tracing::debug!(target: TEST_TARGET, "✓ Sumcheck round verification test passed");
-    }
-
-    #[test]
     fn test_generate_sumcheck_challenges() {
         let _guard = setup_test_tracing();
 
@@ -856,7 +598,6 @@ mod tests {
         // Create a fresh random oracle to generate consistent challenges
         let mut native_ro = PoseidonSponge::new(&config);
         native_ro.absorb(&vk);
-
 
         // Generate challenges using the same method as the circuit
         let gamma: Fr = native_ro.squeeze_field_elements::<Fr>(1)[0];
@@ -1221,7 +962,7 @@ mod tests {
             z_i: vec![hash_as_field], // Input: hash of "hello world" as field element
         };
 
-        tracing::info!(target: TEST_TARGET, "Input hash (hex): {}", 
+        tracing::info!(target: TEST_TARGET, "Input hash (hex): {}",
             initial_hash.iter().map(|b| format!("{:02x}", b)).collect::<String>());
 
         // Step 3: Create consistent random oracle state between prover and verifier
@@ -1357,7 +1098,7 @@ mod tests {
                 // The expected output should be SHA256(SHA256("hello world"))
                 let expected_next_hash =
                     crate::tree_folding::circuit::sha256::calculate_sha256_native(&initial_hash);
-                tracing::info!(target: TEST_TARGET, "Expected next hash (hex): {}", 
+                tracing::info!(target: TEST_TARGET, "Expected next hash (hex): {}",
                     expected_next_hash.iter().map(|b| format!("{:02x}", b)).collect::<String>());
 
                 // The test passes if we get here without panicking

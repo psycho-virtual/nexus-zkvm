@@ -408,17 +408,6 @@ where
     let poly = construct_sumcheck_polynomial(shape, lccs1, lccs2, witness1, witness2, &gamma);
 
     // 3. Run the sum-check protocol
-    // The claimed sum is the weighted sum of the evaluations at each instances' points
-    let _claimed_sum: G::ScalarField = (0..shape.num_matrices)
-        .map(|j| {
-            let gamma_j = gamma.pow([j as u64]);
-            let t = shape.num_matrices;
-            let gamma_t_plus_j = gamma.pow([(t + j) as u64]);
-            gamma_j * lccs1.vs[j] + gamma_t_plus_j * lccs2.vs[j]
-        })
-        .sum();
-
-    // Execute sum-check protocol
     let (sumcheck_proof, sumcheck_state) = MLSumcheck::prove_as_subprotocol(random_oracle, &poly);
 
     // Extract the random point from the sum-check protocol
