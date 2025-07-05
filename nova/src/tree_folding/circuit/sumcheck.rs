@@ -6,14 +6,14 @@
 //! `linearization_augmented_circuit.rs` but has been extracted so it can be
 //! reused by the CCS and LCCS folding verifier gadgets.
 
-#![deny(unsafe_code)]
-
 use ark_crypto_primitives::sponge::constraints::{CryptographicSpongeVar, SpongeWithGadget};
+use ark_ec::AdditiveGroup;
 use ark_ec::{short_weierstrass::SWCurveConfig, CurveGroup};
 use ark_ff::{Field, PrimeField};
 use ark_r1cs_std::{
     eq::EqGadget,
     fields::{fp::FpVar, FieldVar},
+    R1CSVar,
 };
 use ark_relations::r1cs::SynthesisError;
 use tracing::instrument;
@@ -23,6 +23,7 @@ use crate::ccs::Error;
 // Re–export the constant that specifies how many native field elements are
 // squeezed for the verifier challenge in each sum-check round.
 use crate::folding::hypernova::ml_sumcheck::protocol::verifier::SQUEEZE_NATIVE_ELEMENTS_NUM;
+use crate::folding::hypernova::ml_sumcheck::PolynomialInfo;
 
 const LOG_TARGET: &str = "nexus-nova::tree_folding::circuit::sumcheck";
 
@@ -107,7 +108,6 @@ pub fn compute_equality_polynomial_native<G: CurveGroup>(
 /// perform Lagrange interpolation (using the degree-two barycentric formula)
 /// to compute `p_k(r_k)`.
 fn verify_sumcheck_round<G1>(
-    _round: usize,
     expected: &FpVar<G1::ScalarField>,
     evals: &[FpVar<G1::ScalarField>],
     r: &FpVar<G1::ScalarField>,
@@ -121,32 +121,37 @@ where
 
     tracing::trace!(target: LOG_TARGET, "Round consistency check passed");
 
-    // Pre-computed barycentric constants (same as linearization module).
-    let bary_consts = [
-        (G1::ScalarField::from(0u64), G1::ScalarField::from(-6i64)),
-        (G1::ScalarField::from(1u64), G1::ScalarField::from(2i64)),
-        (G1::ScalarField::from(2u64), G1::ScalarField::from(-2i64)),
-        (G1::ScalarField::from(3u64), G1::ScalarField::from(6i64)),
-    ];
+    // Compute Lagrange interpolation: p(r) = Σ_{i=0}^{len-1} p_i * L_i(r)
+    // where L_i(r) = Π_{j≠i} (r - j) / (i - j)
+    let len = MAX_CARDINALITY + 2;
+    let zero = FpVar::<G1::ScalarField>::Constant(G1::ScalarField::ZERO);
+    let one = FpVar::<G1::ScalarField>::Constant(G1::ScalarField::ONE);
 
-    // Compute ∏(x - j).
-    let prod: FpVar<G1::ScalarField> = (0..(MAX_CARDINALITY + 2)).fold(
-        FpVar::<G1::ScalarField>::Constant(G1::ScalarField::ONE),
-        |acc, idx| acc * (r - bary_consts[idx].0),
-    );
+    let mut result = zero;
 
-    // Evaluate polynomial at r using barycentric form.
-    let next_expected: FpVar<G1::ScalarField> = (0..(MAX_CARDINALITY + 2))
-        .map(|i| {
-            let num = &prod * &evals[i];
-            let denom = (r - bary_consts[i].0) * bary_consts[i].1;
-            num.mul_by_inverse(&denom)
-        })
-        .collect::<Result<Vec<_>, _>>()?
-        .iter()
-        .sum();
+    for i in 0..len {
+        let mut numerator = one.clone();
+        let mut denominator = G1::ScalarField::ONE;
 
-    Ok(next_expected)
+        // Compute Π_{j≠i} (r - j) and Π_{j≠i} (i - j)
+        for j in 0..len {
+            if i != j {
+                let j_field = G1::ScalarField::from(j as u64);
+                let i_field = G1::ScalarField::from(i as u64);
+
+                numerator = numerator * (r - j_field);
+                denominator = denominator * (i_field - j_field);
+            }
+        }
+
+        // L_i(r) = numerator / denominator
+        let lagrange_basis = numerator.mul_by_inverse(&FpVar::Constant(denominator))?;
+
+        // Add p_i * L_i(r) to result
+        result = result + (&evals[i] * &lagrange_basis);
+    }
+
+    Ok(result)
 }
 
 // ----------------------------------------------------------------------------------
@@ -182,7 +187,7 @@ pub fn verify_all_sumcheck<G1, RO>(
     random_oracle: &mut RO::Var,
     sumcheck_evals: &[Vec<FpVar<G1::ScalarField>>],
     expected_sum_of_polynomial: FpVar<G1::ScalarField>,
-    sumcheck_rounds: usize,
+    polynomial_info: &PolynomialInfo,
 ) -> Result<(FpVar<G1::ScalarField>, Vec<FpVar<G1::ScalarField>>), SynthesisError>
 where
     G1: SWCurveConfig,
@@ -190,11 +195,22 @@ where
     RO: SpongeWithGadget<G1::ScalarField>,
     RO::Var: CryptographicSpongeVar<G1::ScalarField, RO, Parameters = RO::Config>,
 {
+    random_oracle.absorb(polynomial_info);
+
+    let sumcheck_rounds = polynomial_info.num_variables;
     // Start with the provided expected sum as the initial expected value
     let mut expected = expected_sum_of_polynomial;
     let mut rs_p: Vec<FpVar<G1::ScalarField>> = Vec::with_capacity(sumcheck_rounds);
 
     tracing::debug!(target: LOG_TARGET, "Starting sumcheck verification with {} rounds", sumcheck_rounds);
+    // Debug check: verify constraint system state before starting rounds
+    if let Ok(is_satisfied) = rs_p.cs().is_satisfied() {
+        if is_satisfied {
+            tracing::debug!(target: LOG_TARGET, "Constraint system is already satisfied before sumcheck rounds");
+        } else {
+            tracing::error!(target: LOG_TARGET, "Constraint system is not satisfied before sumcheck rounds");
+        }
+    }
 
     for round in 0..sumcheck_rounds {
         // Absorb polynomial evaluations (the prover message)
@@ -203,12 +219,18 @@ where
 
         // Fetch verifier challenge r_k and immediately absorb it per spec.
         let r_k = random_oracle.squeeze_field_elements(SQUEEZE_NATIVE_ELEMENTS_NUM)?[0].clone();
+        tracing::debug!(target: LOG_TARGET, "Round {}: Generated challenge r_k = {:?}", round, r_k.value().unwrap_or_else(|_| G1::ScalarField::ZERO));
         random_oracle.absorb(&r_k)?;
 
         // Enforce p_k(0) + p_k(1) = p_{k-1}(r_{k-1}) and derive the next
         // expected value via Lagrange interpolation.
-        expected = verify_sumcheck_round::<G1>(round, &expected, evals, &r_k)?;
-        rs_p.push(r_k);
+        expected = verify_sumcheck_round::<G1>(&expected, evals, &r_k)?;
+        rs_p.push(r_k.clone());
+
+        // Check if the constraint system is satisfied after this round
+        if !r_k.cs().is_satisfied().unwrap_or(false) {
+            tracing::error!(target: LOG_TARGET, "Round {}: Constraint system not satisfied after verification", round);
+        }
 
         tracing::debug!(target: LOG_TARGET, "Round {} verified successfully", round);
     }
@@ -349,16 +371,18 @@ mod tests {
     }
 
     // Tracing target for sumcheck tests
-    const TEST_TARGET: &str = "nexus-nova";
+    const TEST_TARGET: &str = "nexus-nova::tree_folding::circuit::sumcheck::test";
 
     // Helper function to set up tracing for tests
     fn setup_test_tracing() -> tracing::subscriber::DefaultGuard {
-        let filter = filter::Targets::new().with_target(TEST_TARGET, tracing::Level::DEBUG);
+        let filter = filter::Targets::new().with_target("nexus-nova", tracing::Level::DEBUG);
         tracing_subscriber::registry()
             .with(
                 tracing_subscriber::fmt::layer()
                     .with_span_events(FmtSpan::ENTER | FmtSpan::CLOSE)
-                    .with_test_writer(),
+                    .with_test_writer()
+                    .without_time()
+                    .with_line_number(true),
             )
             .with(filter)
             .set_default()
@@ -446,7 +470,6 @@ mod tests {
         tracing::info!(target: TEST_TARGET, "Total constraints: {}", cs.num_constraints());
     }
 
-    #[ignore = "We are not done making a better test"]
     #[test]
     fn test_verify_all_sumcheck_sha256() {
         let _guard = setup_test_tracing();
@@ -496,8 +519,11 @@ mod tests {
         let sumcheck_rounds = lin_res.linearization.sumcheck_rounds;
 
         tracing::debug!(target: TEST_TARGET, "✓ SHA256 linearization completed successfully");
-        tracing::debug!(target: TEST_TARGET, "SHA256 linearization data - sumcheck rounds: {}, evaluations per round: {}",
-            sumcheck_rounds, lin_res.linearization.sumcheck_proof.len());
+        tracing::debug!(target: TEST_TARGET,
+            "SHA256 linearization data - sumcheck rounds: {}, evaluations per round: {}",
+            sumcheck_rounds,
+            lin_res.linearization.sumcheck_proof.len()
+        );
         let sumcheck_evals_native: Vec<Vec<Fr>> = lin_res
             .linearization
             .sumcheck_proof
@@ -520,8 +546,22 @@ mod tests {
         // Create SpongeVar for verifier
         let mut sponge_var = PoseidonSpongeVar::new(cs.clone(), &config);
         // The prover squeezed γ once and β sumcheck_rounds times before starting rounds
-        sponge_var.squeeze_field_elements(1).unwrap();
-        sponge_var.squeeze_field_elements(sumcheck_rounds).unwrap();
+        let gamma = sponge_var.squeeze_field_elements(1).unwrap();
+        let beta = sponge_var.squeeze_field_elements(sumcheck_rounds).unwrap();
+
+        tracing::debug!(target: TEST_TARGET, "Generated γ: {:?}", gamma[0].value().unwrap_or_else(|_| Fr::ZERO));
+        tracing::debug!(target: TEST_TARGET, "Generated β values: {:?}",
+                    beta.iter().map(|b| b.value().unwrap_or_else(|_| Fr::ZERO)).collect::<Vec<_>>());
+
+        // The sumcheck protocol starts by absorbing polynomial info in prove_as_subprotocol
+        // We need to replicate this absorption on the verifier side to match prover state
+        // From debug output: max_multiplicands=3, num_variables=16, num_multisets=2
+        let polynomial_info_fields = vec![
+            FpVar::Constant(Fr::from(3u64)),  // max_multiplicands
+            FpVar::Constant(Fr::from(16u64)), // num_variables
+            FpVar::Constant(Fr::from(2u64)),  // num_terms (num_multisets)
+        ];
+        sponge_var.absorb(&polynomial_info_fields).unwrap();
 
         // Expected initial sum is zero for satisfied CCS instance
         let expected_zero = FpVar::<Fr>::Constant(Fr::ZERO);

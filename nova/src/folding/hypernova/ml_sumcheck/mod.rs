@@ -23,6 +23,8 @@ use protocol::{
     IPForMLSumcheck,
 };
 
+const LOG_TARGET: &str = "nova::folding::hypernova::ml_sumcheck";
+
 #[derive(Debug, Clone, Copy)]
 pub enum Error {
     /// protocol rejects this proof
@@ -93,6 +95,8 @@ impl<F: PrimeField + Absorb, RO: CryptographicSponge> MLSumcheck<F, RO> {
         prover_state
             .randomness
             .push(verifier_msg.unwrap().randomness);
+
+        tracing::debug!(target: LOG_TARGET, "Sumcheck Prover randomness. Rounds: {:?}", prover_state.randomness);
 
         (prover_msgs, prover_state)
     }

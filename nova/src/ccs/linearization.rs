@@ -65,6 +65,8 @@ pub struct LinearizationResult<G: CurveGroup, C: PolyCommitmentScheme<G>> {
 pub struct LCCSLinearization<G: CurveGroup, C: PolyCommitmentScheme<G>> {
     /// The linearized LCCS instance
     pub lccs_instance: LCCSInstance<G, C>,
+
+    pub polynomial: ListOfProductsOfPolynomials<G::ScalarField>,
     /// The witness (same as original CCS witness)
     pub witness: CCSWitness<G>,
     /// Sum-check proof transcript
@@ -90,7 +92,10 @@ pub struct LCCSLinearization<G: CurveGroup, C: PolyCommitmentScheme<G>> {
 /// # Returns
 /// * `LinearizationParams` containing the precomputed shape and circuit
 #[instrument(level = "debug", name = "setup_linearization", target = LOG_TARGET)]
-pub fn setup_linearization<G, SC>(cs: ConstraintSystemRef<G::ScalarField>, step_circuit: SC) -> Result<LinearizationParams<G, SC>, Error>
+pub fn setup_linearization<G, SC>(
+    cs: ConstraintSystemRef<G::ScalarField>,
+    step_circuit: SC,
+) -> Result<LinearizationParams<G, SC>, Error>
 where
     G: CurveGroup,
     G::ScalarField: PrimeField,
@@ -103,9 +108,9 @@ where
 
             // Create dummy variables for shape compilation
             let dummy_i = FpVar::new_witness(shape_cs.clone(), || Ok(G::ScalarField::ZERO))?;
-            let dummy_z: Vec<FpVar<G::ScalarField>> = std::iter::repeat_with(|| 
+            let dummy_z: Vec<FpVar<G::ScalarField>> = std::iter::repeat_with(|| {
                 FpVar::new_witness(shape_cs.clone(), || Ok(G::ScalarField::ZERO))
-            )
+            })
             .take(SC::ARITY)
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -168,9 +173,9 @@ where
 /// # Returns
 /// * `LinearizationResult` containing the CCS shape, instance, and linearization
 #[instrument(
-    level = "debug", 
-    skip(params, ck, random_oracle), 
-    name = "synthesize_and_linearize_step", 
+    level = "debug",
+    skip(cs, params, ck, random_oracle),
+    name = "synthesize_and_linearize_step",
     target = LOG_TARGET
 )]
 pub fn synthesize_and_linearize_step<G, C, SC, RO>(
@@ -236,7 +241,6 @@ where
     C: PolyCommitmentScheme<G>,
     SC: StepCircuit<G::ScalarField>,
 {
-
     // Allocate step index and state variables with actual values
     let i_var = FpVar::new_witness(cs.clone(), || Ok(input.i))?;
     let z_vars: Result<Vec<_>, _> = input
@@ -256,7 +260,6 @@ where
     let _z_next = params
         .step_circuit
         .generate_constraints(cs.clone(), &i_var, &z_vars)?;
-
 
     // Extract the constraint system data
     let cs_borrow = cs.borrow().ok_or(Error::NotSatisfied)?;
@@ -290,7 +293,7 @@ where
 /// This implements the core linearization algorithm from the HyperNova paper:
 /// 1. Sample challenges γ and β from the random oracle
 /// 2. Run interactive sum-check protocol on the Q(x) polynomial
-/// 3. Compute theta values from sum-check evaluations  
+/// 3. Compute theta values from sum-check evaluations
 /// 4. Output the LCCS instance
 ///
 /// # Arguments
@@ -334,17 +337,32 @@ where
     })?;
 
     // Step 2: Sample challenges from random oracle
-    let (gamma, beta, sumcheck_rounds) = tracing::debug_span!(target: LOG_TARGET, "challenge_sampling").in_scope(|| {
-        // Sample γ ← F
-        let gamma: G::ScalarField = random_oracle.squeeze_field_elements(1)[0];
-        // Sample β ← F^s
-        let sumcheck_rounds = safe_loglike!(shape.num_constraints) as usize;
-        let beta = random_oracle.squeeze_field_elements(sumcheck_rounds);
+    let (gamma, beta, sumcheck_rounds) =
+        tracing::debug_span!(target: LOG_TARGET, "challenge_sampling").in_scope(|| {
+            // Sample γ ← F
+            let gamma: G::ScalarField = random_oracle.squeeze_field_elements(1)[0];
+            // Sample β ← F^s
+            let sumcheck_rounds = safe_loglike!(shape.num_constraints) as usize;
+            let beta = random_oracle.squeeze_field_elements(sumcheck_rounds);
 
-        tracing::debug!("Challenge sampling completed (γ, β with {} elements)", sumcheck_rounds);
+            tracing::debug!(
+                target: LOG_TARGET,
+                "Challenge sampling completed (γ: {:?})",
+                gamma
+            );
+            tracing::debug!(
+                target: LOG_TARGET,
+                "Challenge sampling completed (β: {:?})",
+                beta
+            );
+            tracing::debug!(
+                target: LOG_TARGET,
+                "Challenge sampling completed with {} elements",
+                sumcheck_rounds
+            );
 
-        (gamma, beta, sumcheck_rounds)
-    });
+            (gamma, beta, sumcheck_rounds)
+        });
 
     // Step 3: Construct the g(x) CCS folding polynomial for sum-check
     let (z, polynomial) = tracing::debug_span!(
@@ -380,7 +398,7 @@ where
         // Check the first round evaluation is 0
         tracing::debug!(
             target: LOG_TARGET,
-            "First round evaluations (claimed sum split): {:?}", 
+            "First round evaluations (claimed sum split): {:?}",
             sumcheck_proof[0].evaluations
         );
 
@@ -394,8 +412,6 @@ where
         (sumcheck_proof, r_x)
     });
 
-    
-
     // Assert that the first round sum evaluates to 0 (claimed sum)
     assert_eq!(
         MLSumcheck::<G::ScalarField, RO>::extract_sum(&sumcheck_proof),
@@ -403,31 +419,32 @@ where
         "First round sum must be 0 for satisfied CCS instance"
     );
 
-    // Step 5: Compute the theta values that are used for the target values vs. 
+    // Step 5: Compute the theta values that are used for the target values vs.
     // θ_j = Σ_{y∈{0,1}^s'} M_j(r'_x, y) · z(y) where j ∈ {1, ..., num_matrices}
     let thetas = compute_theta_values(shape, &z, &r_x);
 
     // Step 6: Build the LCCS instance
-    let lccs_instance = tracing::debug_span!(target: LOG_TARGET, "lccs_instance_creation").in_scope(|| {
-        tracing::debug!("Building LCCS instance");
+    let lccs_instance = tracing::debug_span!(target: LOG_TARGET, "lccs_instance_creation")
+        .in_scope(|| {
+            tracing::debug!("Building LCCS instance");
 
-        // The commitment is the same as the original CCS instance
-        let commitment_W = instance.commitment_W.clone();
+            // The commitment is the same as the original CCS instance
+            let commitment_W = instance.commitment_W.clone();
 
-        // The public inputs X remain the same, with u = 1 (as specified in the algorithm)
-        let mut X = instance.X.clone();
-        if !X.is_empty() {
-            X[0] = G::ScalarField::ONE; // Ensure u = 1
-        }
+            // The public inputs X remain the same, with u = 1 (as specified in the algorithm)
+            let mut X = instance.X.clone();
+            if !X.is_empty() {
+                X[0] = G::ScalarField::ONE; // Ensure u = 1
+            }
 
-        let vs = thetas.clone();
+            let vs = thetas.clone();
 
-        let lccs_instance = LCCSInstance::new(shape, &commitment_W, &X, &r_x, &vs)?;
+            let lccs_instance = LCCSInstance::new(shape, &commitment_W, &X, &r_x, &vs)?;
 
-        tracing::debug!("LCCS instance creation completed");
+            tracing::debug!("LCCS instance creation completed");
 
-        Ok::<_, Error>(lccs_instance)
-    })?;
+            Ok::<_, Error>(lccs_instance)
+        })?;
 
     // Step 7: Verify the linearized instance is satisfied
     tracing::debug_span!(target: LOG_TARGET, "lccs_satisfaction_check").in_scope(|| {
@@ -442,6 +459,7 @@ where
     tracing::info!("✅ CCS to LCCS linearization completed");
 
     Ok(LCCSLinearization {
+        polynomial,
         lccs_instance,
         witness: witness.clone(),
         sumcheck_proof,
@@ -466,6 +484,15 @@ fn construct_css_polynomial<G: CurveGroup>(
 ) -> Result<ListOfProductsOfPolynomials<G::ScalarField>, Error> {
     use ark_spartan::dense_mlpoly::EqPolynomial;
     use ark_std::rc::Rc;
+    // Log shape information for debugging
+    tracing::debug!(
+        target: LOG_TARGET,
+        "CCS shape info - num_vars: {}, num_constraints: {}, num_matrices: {}, num_multisets: {}",
+        shape.num_vars,
+        shape.num_constraints,
+        shape.num_matrices,
+        shape.num_multisets
+    );
 
     let num_vars = safe_loglike!(shape.num_constraints) as usize;
 
@@ -492,6 +519,13 @@ fn construct_css_polynomial<G: CurveGroup>(
             shape.cSs[i].0 * gamma,
         );
     });
+
+    tracing::debug!(
+        target: LOG_TARGET,
+        "Polynomial constructed with max_multiplicands: {}, num_variables: {}",
+        polynomial.max_multiplicands,
+        polynomial.num_variables
+    );
 
     Ok(polynomial)
 }
@@ -533,97 +567,114 @@ where
 {
     tracing::debug_span!(target: LOG_TARGET, "verify_linearization").in_scope(|| {
         tracing::info!("🔍 Starting linearization verification");
-        tracing::debug!("Verifying linearization with {} sumcheck proof rounds (expected: {})", 
-            linearization.sumcheck_proof.len(), linearization.sumcheck_rounds);
+        tracing::debug!(
+            "Verifying linearization with {} sumcheck proof rounds (expected: {})",
+            linearization.sumcheck_proof.len(),
+            linearization.sumcheck_rounds
+        );
 
         // Verify the sumcheck proof has the expected number of rounds
         if linearization.sumcheck_proof.len() != linearization.sumcheck_rounds {
-            tracing::error!("Sumcheck proof round count mismatch: expected {}, got {}", 
-                linearization.sumcheck_rounds, linearization.sumcheck_proof.len());
+            tracing::error!(
+                "Sumcheck proof round count mismatch: expected {}, got {}",
+                linearization.sumcheck_rounds,
+                linearization.sumcheck_proof.len()
+            );
             return Err(Error::NotSatisfied);
         }
 
         // Step 1: Regenerate the same challenges and verify they match stored values
-        let (gamma, beta) = tracing::debug_span!(target: LOG_TARGET, "challenge_regeneration_and_verification").in_scope(|| {
-            // Sample γ ← F (same as in proving)
-            let regenerated_gamma: G::ScalarField = random_oracle.squeeze_field_elements(1)[0];
-            // Sample β ← F^s (same as in proving)
-            let expected_rounds = safe_loglike!(shape.num_constraints) as usize;
-            let regenerated_beta = random_oracle.squeeze_field_elements(expected_rounds);
+        let (gamma, beta) =
+            tracing::debug_span!(target: LOG_TARGET, "challenge_regeneration_and_verification")
+                .in_scope(|| {
+                    // Sample γ ← F (same as in proving)
+                    let regenerated_gamma: G::ScalarField =
+                        random_oracle.squeeze_field_elements(1)[0];
+                    // Sample β ← F^s (same as in proving)
+                    let expected_rounds = safe_loglike!(shape.num_constraints) as usize;
+                    let regenerated_beta = random_oracle.squeeze_field_elements(expected_rounds);
 
-            // Verify the stored sumcheck rounds matches the expected value
-            if linearization.sumcheck_rounds != expected_rounds {
-                tracing::error!("Sumcheck rounds mismatch: expected {}, stored {}", 
-                    expected_rounds, linearization.sumcheck_rounds);
-                return Err(Error::NotSatisfied);
-            }
+                    // Verify the stored sumcheck rounds matches the expected value
+                    if linearization.sumcheck_rounds != expected_rounds {
+                        tracing::error!(
+                            "Sumcheck rounds mismatch: expected {}, stored {}",
+                            expected_rounds,
+                            linearization.sumcheck_rounds
+                        );
+                        return Err(Error::NotSatisfied);
+                    }
 
-            // Verify the regenerated challenges match the stored ones
-            if regenerated_gamma != linearization.gamma {
-                tracing::error!("Gamma challenge mismatch");
-                return Err(Error::NotSatisfied);
-            }
+                    // Verify the regenerated challenges match the stored ones
+                    if regenerated_gamma != linearization.gamma {
+                        tracing::error!("Gamma challenge mismatch");
+                        return Err(Error::NotSatisfied);
+                    }
 
-            if regenerated_beta != linearization.beta {
-                tracing::error!("Beta challenge mismatch");
-                return Err(Error::NotSatisfied);
-            }
+                    if regenerated_beta != linearization.beta {
+                        tracing::error!("Beta challenge mismatch");
+                        return Err(Error::NotSatisfied);
+                    }
 
-            tracing::debug!("Challenge verification passed (γ, β with {} elements, {} rounds)", 
-                expected_rounds, linearization.sumcheck_rounds);
+                    tracing::debug!(
+                        "Challenge verification passed (γ, β with {} elements, {} rounds)",
+                        expected_rounds,
+                        linearization.sumcheck_rounds
+                    );
 
-            Ok::<_, Error>((regenerated_gamma, regenerated_beta))
-        })?;
+                    Ok::<_, Error>((regenerated_gamma, regenerated_beta))
+                })?;
 
         // Step 2: Reconstruct the polynomial and verify sumcheck
-        let (_polynomial_info, r_x) = tracing::debug_span!(target: LOG_TARGET, "sumcheck_verification").in_scope(|| {
-            // Reconstruct the witness vector z = (X || W)
-            let z = [instance.X.as_slice(), witness.W.as_slice()].concat();
+        let (_polynomial_info, r_x) =
+            tracing::debug_span!(target: LOG_TARGET, "sumcheck_verification").in_scope(|| {
+                // Reconstruct the witness vector z = (X || W)
+                let z = [instance.X.as_slice(), witness.W.as_slice()].concat();
 
-            // Reconstruct the same polynomial as in proving
-            let polynomial = construct_css_polynomial(shape, &z, &beta, gamma)?;
-            let polynomial_info = polynomial.info();
+                // Reconstruct the same polynomial as in proving
+                let polynomial = construct_css_polynomial(shape, &z, &beta, gamma)?;
+                let polynomial_info = polynomial.info();
 
-            // The claimed sum should be 0 for a satisfied CCS instance
-            let claimed_sum = G::ScalarField::ZERO;
+                // The claimed sum should be 0 for a satisfied CCS instance
+                let claimed_sum = G::ScalarField::ZERO;
 
-            // Verify the sumcheck proof directly
-            let subclaim = MLSumcheck::verify_as_subprotocol(
-                random_oracle,
-                &polynomial_info,
-                claimed_sum,
-                &linearization.sumcheck_proof,
-            )
-            .map_err(|_| Error::NotSatisfied)?;
+                // Verify the sumcheck proof directly
+                let subclaim = MLSumcheck::verify_as_subprotocol(
+                    random_oracle,
+                    &polynomial_info,
+                    claimed_sum,
+                    &linearization.sumcheck_proof,
+                )
+                .map_err(|_| Error::NotSatisfied)?;
 
-            // Extract the evaluation point from the subclaim
-            let r_x = subclaim.point;
+                // Extract the evaluation point from the subclaim
+                let r_x = subclaim.point;
 
-            // Verify the evaluation point matches what's stored in the LCCS instance
-            if r_x != linearization.lccs_instance.rs {
-                tracing::error!("Evaluation point mismatch");
-                return Err(Error::NotSatisfied);
-            }
+                // Verify the evaluation point matches what's stored in the LCCS instance
+                if r_x != linearization.lccs_instance.rs {
+                    tracing::error!("Evaluation point mismatch");
+                    return Err(Error::NotSatisfied);
+                }
 
-            // Verify the final evaluation is indeed 0 (as expected for satisfied CCS)
-            if subclaim.expected_evaluation != G::ScalarField::ZERO {
-                tracing::error!("Expected evaluation is not zero");
-                return Err(Error::NotSatisfied);
-            }
+                // Verify the final evaluation is indeed 0 (as expected for satisfied CCS)
+                if subclaim.expected_evaluation != G::ScalarField::ZERO {
+                    tracing::error!("Expected evaluation is not zero");
+                    return Err(Error::NotSatisfied);
+                }
 
-            tracing::debug!("Sumcheck verification passed");
+                tracing::debug!("Sumcheck verification passed");
 
-            Ok::<_, Error>((polynomial_info, r_x))
-        })?;
+                Ok::<_, Error>((polynomial_info, r_x))
+            })?;
 
         // Step 3: Compute and verify e₂ = eq(β, r'ₓ) matches stored value
-        let e2 = tracing::debug_span!(target: LOG_TARGET, "equality_polynomial_verification").in_scope(|| {
-            let recomputed_e2 = compute_equality_polynomial_native::<G>(&beta, &r_x)?;
+        let e2 = tracing::debug_span!(target: LOG_TARGET, "equality_polynomial_verification")
+            .in_scope(|| {
+                let recomputed_e2 = compute_equality_polynomial_native::<G>(&beta, &r_x)?;
 
-            tracing::debug!("e₂ verification passed: {:?}", recomputed_e2);
+                tracing::debug!("e₂ verification passed: {:?}", recomputed_e2);
 
-            Ok::<_, Error>(recomputed_e2)
-        })?;
+                Ok::<_, Error>(recomputed_e2)
+            })?;
 
         // Step 4: Recompute and verify v_j := ∑_{y ∈ {0,1}^{s'}} M_{f_j}(r_x, y) · z_e(y)
         tracing::debug_span!(target: LOG_TARGET, "matrix_vector_verification").in_scope(|| {
@@ -645,7 +696,10 @@ where
                 return Err(Error::NotSatisfied);
             }
 
-            tracing::debug!("Matrix-vector computations verified ({} values)", computed_vs.len());
+            tracing::debug!(
+                "Matrix-vector computations verified ({} values)",
+                computed_vs.len()
+            );
             Ok::<_, Error>(())
         })?;
 
@@ -695,8 +749,6 @@ where
     })
 }
 
-
-
 /// Computes theta values for LCCS linearization
 ///
 /// Computes θ_j = Σ_{y∈{0,1}^s'} M_j(r_x, y) · z(y) for j ∈ {0, ..., num_matrices-1}
@@ -713,7 +765,7 @@ where
 /// * `Vec<G::ScalarField>` - The computed theta values, one for each matrix
 #[instrument(
     target = LOG_TARGET,
-    level = "debug", 
+    level = "debug",
     skip(shape, z, r_x),
     fields(
         num_matrices = shape.num_matrices,
@@ -753,14 +805,14 @@ pub fn compute_theta_values<G: CurveGroup>(
 /// 1. Absorb theta values into the random oracle
 /// 2. Sample folding challenge ρ ← F
 /// 3. Fold commitments: C ← C₁ + ρ·C₂
-/// 4. Fold u values: u ← u₁ + ρ·u₂  
+/// 4. Fold u values: u ← u₁ + ρ·u₂
 /// 5. Fold x values: x ← x₁ + ρ·x₂
 /// 6. Fold v values: vⱼ ← θⱼ,₁ + ρ·θⱼ,₂
 /// 7. Fold witnesses: w ← w₁ + ρ·w₂
 ///
 /// # Arguments
 /// * `ccs1` - First CCS instance to fold
-/// * `ccs2` - Second CCS instance to fold  
+/// * `ccs2` - Second CCS instance to fold
 /// * `witness1` - Witness for the first CCS instance
 /// * `witness2` - Witness for the second CCS instance
 /// * `thetas1` - Theta values for the first instance
@@ -805,11 +857,11 @@ where
     if ccs1.X.len() != ccs2.X.len() {
         return Err(Error::InvalidInputLength);
     }
-    
+
     if thetas1.len() != thetas2.len() {
         return Err(Error::InvalidTargets);
     }
-    
+
     if thetas1.len() != shape.num_matrices {
         return Err(Error::InvalidTargets);
     }
@@ -834,62 +886,66 @@ where
     tracing::debug!("Folded commitments");
 
     // Step 4: Fold u and x values
-    let (u_fold, x_fold) = tracing::debug_span!(target: LOG_TARGET, "input_folding").in_scope(|| {
-        // Extract u values (first element) and x values (rest)
-        let (u1, x1) = (&ccs1.X[0], &ccs1.X[1..]);
-        let (u2, x2) = (&ccs2.X[0], &ccs2.X[1..]);
+    let (u_fold, x_fold) =
+        tracing::debug_span!(target: LOG_TARGET, "input_folding").in_scope(|| {
+            // Extract u values (first element) and x values (rest)
+            let (u1, x1) = (&ccs1.X[0], &ccs1.X[1..]);
+            let (u2, x2) = (&ccs2.X[0], &ccs2.X[1..]);
 
-        // Fold u values: u ← u₁ + ρ·u₂
-        let u_fold = *u1 + rho * u2;
+            // Fold u values: u ← u₁ + ρ·u₂
+            let u_fold = *u1 + rho * u2;
 
-        // Fold x values: x ← x₁ + ρ·x₂
-        let x_fold: Vec<G::ScalarField> = x1
-            .iter()
-            .zip(x2.iter())
-            .map(|(a, b)| *a + rho * b)
-            .collect();
+            // Fold x values: x ← x₁ + ρ·x₂
+            let x_fold: Vec<G::ScalarField> = x1
+                .iter()
+                .zip(x2.iter())
+                .map(|(a, b)| *a + rho * b)
+                .collect();
 
-        tracing::debug!("Folded u and x values (u_fold: {:?})", u_fold);
-        
-        (u_fold, x_fold)
-    });
+            tracing::debug!("Folded u and x values (u_fold: {:?})", u_fold);
 
-    // Step 5: Fold v values: vⱼ ← θⱼ,₁ + ρ·θⱼ,₂  
-    let vs: Vec<G::ScalarField> = tracing::debug_span!(target: LOG_TARGET, "theta_folding").in_scope(|| {
-        let vs : Vec<G::ScalarField> = thetas1
-            .iter()
-            .zip(thetas2.iter())
-            .map(|(theta1, theta2)| *theta1 + rho * theta2)
-            .collect();
+            (u_fold, x_fold)
+        });
 
-        tracing::debug!("Folded {} theta values into vs", vs.len());
-        vs
-    });
+    // Step 5: Fold v values: vⱼ ← θⱼ,₁ + ρ·θⱼ,₂
+    let vs: Vec<G::ScalarField> = tracing::debug_span!(target: LOG_TARGET, "theta_folding")
+        .in_scope(|| {
+            let vs: Vec<G::ScalarField> = thetas1
+                .iter()
+                .zip(thetas2.iter())
+                .map(|(theta1, theta2)| *theta1 + rho * theta2)
+                .collect();
+
+            tracing::debug!("Folded {} theta values into vs", vs.len());
+            vs
+        });
 
     // Step 6: Create the folded LCCS instance
-    let lccs_instance = tracing::debug_span!(target: LOG_TARGET, "lccs_creation").in_scope(|| {
-        let X = [vec![u_fold], x_fold].concat();
-        
-        let lccs_instance = LCCSInstance::new(shape, &commitment_W, &X, merged_rs, &vs)?;
-        
-        tracing::debug!("Created folded LCCS instance");
-        Ok::<_, Error>(lccs_instance)
-    })?;
+    let lccs_instance =
+        tracing::debug_span!(target: LOG_TARGET, "lccs_creation").in_scope(|| {
+            let X = [vec![u_fold], x_fold].concat();
+
+            let lccs_instance = LCCSInstance::new(shape, &commitment_W, &X, merged_rs, &vs)?;
+
+            tracing::debug!("Created folded LCCS instance");
+            Ok::<_, Error>(lccs_instance)
+        })?;
 
     // Step 7: Fold witnesses: w ← w₁ + ρ·w₂
-    let folded_witness = tracing::debug_span!(target: LOG_TARGET, "witness_folding").in_scope(|| {
-        let folded_W: Vec<G::ScalarField> = witness1
-            .W
-            .iter()
-            .zip(witness2.W.iter())
-            .map(|(w1, w2)| *w1 + rho * w2)
-            .collect();
+    let folded_witness =
+        tracing::debug_span!(target: LOG_TARGET, "witness_folding").in_scope(|| {
+            let folded_W: Vec<G::ScalarField> = witness1
+                .W
+                .iter()
+                .zip(witness2.W.iter())
+                .map(|(w1, w2)| *w1 + rho * w2)
+                .collect();
 
-        let folded_witness = CCSWitness::new(shape, &folded_W)?;
-        
-        tracing::debug!("Folded witness (length: {})", folded_W.len());
-        Ok::<_, Error>(folded_witness)
-    })?;
+            let folded_witness = CCSWitness::new(shape, &folded_W)?;
+
+            tracing::debug!("Folded witness (length: {})", folded_W.len());
+            Ok::<_, Error>(folded_witness)
+        })?;
 
     tracing::info!("✅ CCS folding and linearization completed");
     tracing::debug!("Final LCCS instance vs length: {}", lccs_instance.vs.len());
@@ -917,10 +973,10 @@ mod tests {
     use ark_relations::r1cs::{ConstraintSystem, ConstraintSystemRef, SynthesisError};
     use ark_spartan::polycommitments::PCSKeys;
     use ark_std::{marker::PhantomData, test_rng};
+    use derivative::Derivative;
     use tracing_subscriber::{
         filter, fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt,
     };
-    use derivative::Derivative;
 
     type Z = Zeromorph<Bn254>;
 
@@ -945,7 +1001,7 @@ mod tests {
     #[derive(Default, Derivative)]
     #[derivative(Debug)]
     struct CubicCircuit<F: Field> {
-        #[derivative(Debug="ignore")]
+        #[derivative(Debug = "ignore")]
         _phantom: PhantomData<F>,
     }
 
@@ -999,8 +1055,13 @@ mod tests {
 
         // Synthesize and linearize using params
         let cs = ConstraintSystem::new_ref();
-        let result =
-            synthesize_and_linearize_step::<G, Z, _, _>(cs, &params, &input, &ck, &mut random_oracle)?;
+        let result = synthesize_and_linearize_step::<G, Z, _, _>(
+            cs,
+            &params,
+            &input,
+            &ck,
+            &mut random_oracle,
+        )?;
 
         tracing::debug!(target: TEST_TARGET, "✓ Linearization completed successfully");
 
@@ -1128,8 +1189,13 @@ mod tests {
         };
 
         let cs = ConstraintSystem::new_ref();
-        let result =
-            synthesize_and_linearize_step::<G, Z, _, _>(cs, &params, &input, &ck, &mut random_oracle)?;
+        let result = synthesize_and_linearize_step::<G, Z, _, _>(
+            cs,
+            &params,
+            &input,
+            &ck,
+            &mut random_oracle,
+        )?;
 
         // Test key properties of the linearization
 
