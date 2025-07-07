@@ -18,7 +18,8 @@ use ark_r1cs_std::{
     fields::{fp::FpVar, FieldVar},
     R1CSVar,
 };
-use ark_relations::r1cs::{Namespace, SynthesisError};
+use ark_relations::ns;
+use ark_relations::r1cs::{ConstraintSystemRef, Namespace, SynthesisError};
 use ark_std::marker::PhantomData;
 use ark_std::ops::Neg;
 use std::{borrow::Borrow, fmt::Debug};
@@ -244,6 +245,7 @@ where
     target = LOG_TARGET
 )]
 pub fn verify_linearization_in_circuit<G1, RO>(
+    cs: &mut ConstraintSystemRef<G1::ScalarField>,
     random_oracle: &mut RO::Var,
     input: &LinearizationAugmentedVar<G1, RO>,
     polynomial_info: &PolynomialInfo,
@@ -259,6 +261,7 @@ where
     // 1. Re-derive the challenges γ and β and enforce consistency with the
     //    values provided in the linearization proof.
     // --------------------------------------------------------------------
+    ns!(cs, "challenge_generation of gamma and beta");
     tracing::debug!(
         "🔍 About to generate challenges with sumcheck_rounds: {}",
         sumcheck_rounds
@@ -290,6 +293,7 @@ where
     );
 
     // Enforce that the regenerated challenges equal the provided ones.
+    ns!(cs, "enforcing linearization of gamma");
     gamma
         .enforce_equal(&input.linearization.gamma)
         .map_err(|e| {
@@ -325,7 +329,9 @@ where
     // --------------------------------------------------------------------
     // 3. Verify all sumcheck rounds
     // --------------------------------------------------------------------
+    ns!(cs, "sumcheck_verification");
     let (expected, sumcheck_random_challenges) = verify_all_sumcheck::<G1, RO>(
+        cs,
         random_oracle,
         &input.linearization.sumcheck_evals,
         expected_sum_of_polynomial,
@@ -335,6 +341,7 @@ where
     // --------------------------------------------------------------------
     // 4. Compute equality polynomial e₂ = eq(β, r_x)
     // --------------------------------------------------------------------
+    ns!(cs, "equality_polynomial_computation");
     tracing::debug!(
         target: LOG_TARGET,
         "🔍 Computing equality polynomial with beta len: {}, rs_p len: {}",
@@ -355,6 +362,7 @@ where
     // --------------------------------------------------------------------
     // 5. Compute verification equation and enforce equality
     // --------------------------------------------------------------------
+    ns!(cs, "verification_equation");
     tracing::debug!(target: LOG_TARGET, "🔍 Computing verification right side");
 
     // Compute the right side: cr = (∑ᵢ cᵢ·∏ⱼ∈Sᵢ θⱼ) · γᵗ⁺¹ · e₂
@@ -587,7 +595,7 @@ mod tests {
         let _guard = setup_test_tracing();
 
         let mut rng = test_rng();
-        let cs = ConstraintSystem::<Fr>::new_ref();
+        let mut cs = ConstraintSystem::<Fr>::new_ref();
 
         // Setup polynomial commitment for CCS
         let (_shape, _u, _w, _ck) =
@@ -713,6 +721,7 @@ mod tests {
         circuit_random_oracle.absorb(&input.vk).unwrap();
 
         let result = verify_linearization_in_circuit::<ark_bn254::g1::Config, PoseidonSponge<Fr>>(
+            &mut cs,
             &mut circuit_random_oracle,
             &input,
             &PolynomialInfo {
@@ -782,7 +791,7 @@ mod tests {
         // Absorb verification key to establish consistent random oracle state
         prover_random_oracle.absorb(&vk);
 
-        let cs = ConstraintSystem::new_ref();
+        let mut cs = ConstraintSystem::new_ref();
 
         let linearization_result = crate::ccs::linearization::synthesize_and_linearize_step::<
             Projective<ark_bn254::g1::Config>,
@@ -835,6 +844,7 @@ mod tests {
         let _sumcheck_rounds = native_input.linearization.sumcheck_rounds;
         let verification_result =
             verify_linearization_in_circuit::<ark_bn254::g1::Config, PoseidonSponge<Fr>>(
+                &mut cs,
                 &mut circuit_random_oracle,
                 &augmented_input,
                 &native_input.linearization.polynomial.info(),
@@ -992,7 +1002,7 @@ mod tests {
         .unwrap();
 
         // Create a new constraint system for the augmented circuit verification
-        let cs = ConstraintSystem::new_ref();
+        let mut cs = ConstraintSystem::new_ref();
 
         tracing::info!(target: TEST_TARGET, "✓ Real SHA256 linearization completed successfully");
         tracing::info!(
@@ -1031,6 +1041,7 @@ mod tests {
         let _sumcheck_rounds = native_input.linearization.sumcheck_rounds;
         let verification_result =
             verify_linearization_in_circuit::<ark_bn254::g1::Config, PoseidonSponge<Fr>>(
+                &mut cs,
                 &mut circuit_random_oracle,
                 &augmented_input,
                 &native_input.linearization.polynomial.info(),

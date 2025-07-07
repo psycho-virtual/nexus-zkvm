@@ -16,7 +16,8 @@ use ark_r1cs_std::{
     R1CSVar,
 };
 
-use ark_relations::r1cs::SynthesisError;
+use ark_relations::ns;
+use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
 use tracing::instrument;
 
 use crate::ccs::Error;
@@ -185,6 +186,7 @@ where
 #[allow(clippy::type_complexity)]
 #[instrument(level = "debug", skip(random_oracle, sumcheck_evals))]
 pub fn verify_all_sumcheck<G1, RO>(
+    cs: &mut ConstraintSystemRef<G1::ScalarField>,
     random_oracle: &mut RO::Var,
     sumcheck_evals: &[Vec<FpVar<G1::ScalarField>>],
     expected_sum_of_polynomial: FpVar<G1::ScalarField>,
@@ -196,6 +198,7 @@ where
     RO: SpongeWithGadget<G1::ScalarField>,
     RO::Var: CryptographicSpongeVar<G1::ScalarField, RO, Parameters = RO::Config>,
 {
+    ns!(cs, "Absorbing Polynomial Info into Random oracle");
     // Absorb polynomial info to synchronize with prover's random oracle state
     let polynomial_info_fields = vec![
         FpVar::Constant(G1::ScalarField::from(
@@ -223,6 +226,7 @@ where
     }
 
     for round in 0..sumcheck_rounds {
+        ns!(cs, "Sumcheck Round");
         // Absorb polynomial evaluations (the prover message)
         let evals = &sumcheck_evals[round];
         random_oracle.absorb(evals)?;
@@ -442,7 +446,7 @@ mod tests {
             .collect();
 
         // Build circuit witness for the evaluations
-        let cs = ConstraintSystem::<Fr>::new_ref();
+        let mut cs = ConstraintSystem::<Fr>::new_ref();
         let sumcheck_evals_var: Vec<Vec<FpVar<Fr>>> = sumcheck_evals_native
             .iter()
             .map(|round| {
@@ -463,6 +467,7 @@ mod tests {
         let expected_zero = FpVar::<Fr>::Constant(Fr::ZERO);
 
         let res = verify_all_sumcheck::<ark_bn254::g1::Config, PoseidonSponge<Fr>>(
+            &mut cs,
             &mut sponge_var,
             &sumcheck_evals_var,
             expected_zero,
@@ -542,7 +547,7 @@ mod tests {
             .collect();
 
         // Build circuit witness for the evaluations
-        let cs = ConstraintSystem::<Fr>::new_ref();
+        let mut cs = ConstraintSystem::<Fr>::new_ref();
         let sumcheck_evals_var: Vec<Vec<FpVar<Fr>>> = sumcheck_evals_native
             .iter()
             .map(|round| {
@@ -570,6 +575,7 @@ mod tests {
         let expected_zero = FpVar::<Fr>::Constant(Fr::ZERO);
 
         let res = verify_all_sumcheck::<ark_bn254::g1::Config, PoseidonSponge<Fr>>(
+            &mut cs,
             &mut sponge_var,
             &sumcheck_evals_var,
             expected_zero,
@@ -710,7 +716,7 @@ mod tests {
             .collect();
 
         // Build circuit witness for the evaluations
-        let cs = ConstraintSystem::<Fr>::new_ref();
+        let mut cs = ConstraintSystem::<Fr>::new_ref();
         let sumcheck_evals_var: Vec<Vec<FpVar<Fr>>> = sumcheck_evals_native
             .iter()
             .map(|round| {
@@ -727,14 +733,11 @@ mod tests {
         // For CCS folding, the expected sum should be zero for satisfied instances
         let expected_zero = FpVar::<Fr>::Constant(Fr::ZERO);
 
-        // Create polynomial info for cubic test based on expected values
-        let polynomial_info = PolynomialInfo {
-            max_multiplicands: 3,
-            num_variables: 8,
-            num_terms: 2,
-        };
+        // Get polynomial info from the actual constructed polynomial
+        let polynomial_info = combined_poly.info();
 
         let verification_result = verify_all_sumcheck::<ark_bn254::g1::Config, PoseidonSponge<Fr>>(
+            &mut cs,
             &mut verifier_sponge_var,
             &sumcheck_evals_var,
             expected_zero,

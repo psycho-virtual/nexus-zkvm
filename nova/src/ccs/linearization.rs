@@ -91,7 +91,7 @@ pub struct LCCSLinearization<G: CurveGroup, C: PolyCommitmentScheme<G>> {
 ///
 /// # Returns
 /// * `LinearizationParams` containing the precomputed shape and circuit
-#[instrument(level = "debug", name = "setup_linearization", target = LOG_TARGET)]
+#[instrument(level = "debug", name = "setup_linearization", target = LOG_TARGET, skip(cs))]
 pub fn setup_linearization<G, SC>(
     cs: ConstraintSystemRef<G::ScalarField>,
     step_circuit: SC,
@@ -221,7 +221,7 @@ where
     target = LOG_TARGET,
     level = "debug",
     name = "synthesize_step_circuit_with_params",
-    skip(ck, params, input),
+    skip(cs, ck, params, input),
     fields(
         num_matrices = params.ccs_shape.num_matrices,
         num_constraints = params.ccs_shape.num_constraints,
