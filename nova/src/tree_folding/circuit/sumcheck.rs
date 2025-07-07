@@ -766,4 +766,162 @@ mod tests {
         tracing::info!(target: TEST_TARGET, "Constructed polynomial with {} variables and {} products, verified with {} rounds",
             combined_poly.num_variables, combined_poly.products.len(), sumcheck_proof.len());
     }
+
+    #[test]
+    fn test_construct_combined_ccs_polynomial_sha256_chain() {
+        let _guard = setup_test_tracing();
+        let mut rng = test_rng();
+
+        tracing::info!(target: TEST_TARGET, "🔗 Starting combined CCS polynomial construction test for SHA256 chain");
+
+        let config = poseidon_config::<Fr>();
+        let num_vars = 16; // SHA256 requires more variables
+        let ck = {
+            let srs = Z::setup(num_vars, b"test", &mut rng).unwrap();
+            let keys = Z::trim(&srs, num_vars);
+            keys.ck
+        };
+
+        // Setup CCS shape for SHA256 circuit
+        let cs_setup = ConstraintSystem::<Fr>::new_ref();
+        let params =
+            setup_linearization::<G1, _>(cs_setup, SequentialSha256Circuit::<Fr>::new()).unwrap();
+
+        // Create SHA256 chain: y = SHA256("hello world"), z = SHA256(y)
+        let initial_message = b"hello world";
+        let y_hash = calculate_sha256_native(initial_message);
+        let z_hash = calculate_sha256_native(&y_hash);
+
+        // Convert hashes to field elements
+        let y_hash_field = conversions::bytes_to_field::<Fr>(&y_hash);
+        let z_hash_field = conversions::bytes_to_field::<Fr>(&z_hash);
+
+        tracing::debug!(target: TEST_TARGET, "First SHA256 input: {:?}",
+            initial_message.iter().map(|b| format!("{:02x}", b)).collect::<String>());
+        tracing::debug!(target: TEST_TARGET, "First SHA256 output (y): {}",
+            y_hash.iter().map(|b| format!("{:02x}", b)).collect::<String>());
+        tracing::debug!(target: TEST_TARGET, "Second SHA256 output (z): {}",
+            z_hash.iter().map(|b| format!("{:02x}", b)).collect::<String>());
+
+        // Create step inputs for the two instances
+        let step_input1 = StepFunctionInput { i: Fr::ONE, z_i: vec![y_hash_field] };
+        let step_input2 = StepFunctionInput {
+            i: Fr::from(2u64),
+            z_i: vec![z_hash_field],
+        };
+
+        // Synthesize two CCS instances
+        let cs1 = ConstraintSystem::<Fr>::new_ref();
+        let (u1, w1) =
+            synthesize_step_circuit_with_params::<G1, Z, _>(cs1, &params, &step_input1, &ck)
+                .unwrap();
+
+        let cs2 = ConstraintSystem::<Fr>::new_ref();
+        let (u2, w2) =
+            synthesize_step_circuit_with_params::<G1, Z, _>(cs2, &params, &step_input2, &ck)
+                .unwrap();
+
+        tracing::debug!(target: TEST_TARGET, "✓ Both SHA256 CCS instances synthesized successfully");
+        tracing::debug!(target: TEST_TARGET, "Instance 1: X_len={}, W_len={}", u1.X.len(), w1.W.len());
+        tracing::debug!(target: TEST_TARGET, "Instance 2: X_len={}, W_len={}", u2.X.len(), w2.W.len());
+
+        // Prepare witness vectors for polynomial construction
+        let z1 = [u1.X.clone(), w1.W.clone()].concat();
+        let z2 = [u2.X.clone(), w2.W.clone()].concat();
+
+        // Generate random challenge values
+        let gamma = Fr::rand(&mut rng);
+        let num_sumcheck_vars = (params.ccs_shape.num_constraints as f64).log2().ceil() as usize;
+        let beta: Vec<Fr> = (0..num_sumcheck_vars).map(|_| Fr::rand(&mut rng)).collect();
+
+        tracing::debug!(target: TEST_TARGET, "Test parameters: num_constraints={}, num_sumcheck_vars={}, z1_len={}, z2_len={}",
+            params.ccs_shape.num_constraints, num_sumcheck_vars, z1.len(), z2.len());
+
+        // Test the combined polynomial construction
+        let combined_poly =
+            construct_combined_ccs_polynomial::<G1>(&params.ccs_shape, &z1, &z2, &beta, gamma)
+                .unwrap();
+
+        tracing::debug!(target: TEST_TARGET, "✓ Combined SHA256 polynomial construction completed successfully");
+        tracing::debug!(target: TEST_TARGET, "Combined polynomial num_variables: {}, products count: {}",
+            combined_poly.num_variables, combined_poly.products.len());
+
+        // Verify the polynomial has the expected structure
+        assert_eq!(
+            combined_poly.num_variables, num_sumcheck_vars,
+            "Combined polynomial should have {} variables, got {}",
+            num_sumcheck_vars, combined_poly.num_variables
+        );
+
+        // Verify that the polynomial has products (non-empty)
+        assert!(
+            !combined_poly.products.is_empty(),
+            "Combined polynomial should have at least one product term"
+        );
+
+        // Run the sumcheck protocol on the combined polynomial
+        let mut prover_ro = PoseidonSponge::new(&config);
+        let (sumcheck_proof, _prover_state) =
+            MLSumcheck::prove_as_subprotocol(&mut prover_ro, &combined_poly);
+
+        tracing::debug!(target: TEST_TARGET, "✓ Sumcheck proof generated with {} rounds", sumcheck_proof.len());
+
+        // Extract evaluations from the sumcheck proof
+        let sumcheck_evals_native: Vec<Vec<Fr>> = sumcheck_proof
+            .iter()
+            .map(|msg| msg.evaluations.clone())
+            .collect();
+
+        // Build circuit witness for the evaluations
+        let mut cs = ConstraintSystem::<Fr>::new_ref();
+        let sumcheck_evals_var: Vec<Vec<FpVar<Fr>>> = sumcheck_evals_native
+            .iter()
+            .map(|round| {
+                round
+                    .iter()
+                    .map(|e| FpVar::new_witness(cs.clone(), || Ok(*e)).unwrap())
+                    .collect()
+            })
+            .collect();
+
+        // Create SpongeVar for verifier (fresh random oracle)
+        let mut verifier_sponge_var = PoseidonSpongeVar::new(cs.clone(), &config);
+
+        // For CCS folding, the expected sum should be zero for satisfied instances
+        let expected_zero = FpVar::<Fr>::Constant(Fr::ZERO);
+
+        // Get polynomial info from the actual constructed polynomial
+        let polynomial_info = combined_poly.info();
+
+        let verification_result = verify_all_sumcheck::<ark_bn254::g1::Config, PoseidonSponge<Fr>>(
+            &mut cs,
+            &mut verifier_sponge_var,
+            &sumcheck_evals_var,
+            expected_zero,
+            &polynomial_info,
+        )
+        .unwrap();
+
+        tracing::debug!(target: TEST_TARGET, "✓ Sumcheck verification completed successfully");
+        tracing::debug!(target: TEST_TARGET, "Final expected value: {:?}", verification_result.0.value().unwrap_or_else(|_| Fr::ZERO));
+        tracing::debug!(target: TEST_TARGET, "Challenges collected: {}", verification_result.1.len());
+
+        // Ensure constraint system is satisfied
+        assert!(
+            cs.is_satisfied().unwrap(),
+            "SHA256 chain sumcheck verification failed: constraint system is not satisfied. \
+             This indicates the sumcheck proof verification generated invalid constraints."
+        );
+
+        // Verify we got the expected number of challenges
+        assert_eq!(
+            verification_result.1.len(),
+            sumcheck_proof.len(),
+            "Number of challenges should match number of sumcheck rounds"
+        );
+
+        tracing::info!(target: TEST_TARGET, "✅ SHA256 chain CCS polynomial construction and sumcheck verification completed successfully");
+        tracing::info!(target: TEST_TARGET, "Folded SHA256 chain with {} variables and {} products, verified with {} rounds",
+            combined_poly.num_variables, combined_poly.products.len(), sumcheck_proof.len());
+    }
 }
