@@ -15,6 +15,7 @@ use ark_r1cs_std::{
     fields::{fp::FpVar, FieldVar},
     R1CSVar,
 };
+
 use ark_relations::r1cs::SynthesisError;
 use tracing::instrument;
 
@@ -195,11 +196,20 @@ where
     RO: SpongeWithGadget<G1::ScalarField>,
     RO::Var: CryptographicSpongeVar<G1::ScalarField, RO, Parameters = RO::Config>,
 {
-    random_oracle.absorb(polynomial_info);
+    // Absorb polynomial info to synchronize with prover's random oracle state
+    let polynomial_info_fields = vec![
+        FpVar::Constant(G1::ScalarField::from(
+            polynomial_info.max_multiplicands as u64,
+        )),
+        FpVar::Constant(G1::ScalarField::from(polynomial_info.num_variables as u64)),
+        FpVar::Constant(G1::ScalarField::from(polynomial_info.num_terms as u64)),
+    ];
+    random_oracle.absorb(&polynomial_info_fields)?;
 
     let sumcheck_rounds = polynomial_info.num_variables;
+
     // Start with the provided expected sum as the initial expected value
-    let mut expected = expected_sum_of_polynomial;
+    let mut expected = expected_sum_of_polynomial.clone();
     let mut rs_p: Vec<FpVar<G1::ScalarField>> = Vec::with_capacity(sumcheck_rounds);
 
     tracing::debug!(target: LOG_TARGET, "Starting sumcheck verification with {} rounds", sumcheck_rounds);
@@ -456,7 +466,7 @@ mod tests {
             &mut sponge_var,
             &sumcheck_evals_var,
             expected_zero,
-            sumcheck_rounds,
+            &lin_res.linearization.polynomial.info(),
         )
         .unwrap();
 
@@ -553,15 +563,8 @@ mod tests {
         tracing::debug!(target: TEST_TARGET, "Generated β values: {:?}",
                     beta.iter().map(|b| b.value().unwrap_or_else(|_| Fr::ZERO)).collect::<Vec<_>>());
 
-        // The sumcheck protocol starts by absorbing polynomial info in prove_as_subprotocol
-        // We need to replicate this absorption on the verifier side to match prover state
-        // From debug output: max_multiplicands=3, num_variables=16, num_multisets=2
-        let polynomial_info_fields = vec![
-            FpVar::Constant(Fr::from(3u64)),  // max_multiplicands
-            FpVar::Constant(Fr::from(16u64)), // num_variables
-            FpVar::Constant(Fr::from(2u64)),  // num_terms (num_multisets)
-        ];
-        sponge_var.absorb(&polynomial_info_fields).unwrap();
+        // Get polynomial info from the linearization result
+        let polynomial_info = lin_res.linearization.polynomial.info();
 
         // Expected initial sum is zero for satisfied CCS instance
         let expected_zero = FpVar::<Fr>::Constant(Fr::ZERO);
@@ -570,16 +573,45 @@ mod tests {
             &mut sponge_var,
             &sumcheck_evals_var,
             expected_zero,
-            sumcheck_rounds,
+            &polynomial_info,
         )
         .unwrap();
 
         // Ensure constraint system satisfied
-        assert!(
-            cs.is_satisfied().unwrap(),
-            "SHA256 sumcheck verification failed: constraint system is not satisfied. \
-             This indicates the sumcheck proof verification generated invalid constraints."
-        );
+        if !cs.is_satisfied().unwrap() {
+            // 1) Which *index* failed?
+            let idx = cs.which_is_unsatisfied().unwrap().unwrap();
+
+            // 2) Map that index to its human-readable name.
+            let names = cs.constraint_names().unwrap();
+            if let Ok(idx_num) = idx.parse::<usize>() {
+                if idx_num < names.len() {
+                    println!("unsatisfied @{}: {}", idx, names[idx_num]);
+                    tracing::debug!(target: TEST_TARGET, "unsatisfied @{}: {}", idx, names[idx_num]);
+
+                    panic!(
+                        "SHA256 sumcheck verification failed: constraint system is not satisfied. \
+                         This indicates the sumcheck proof verification generated invalid constraints.\n\
+                         First unsatisfied constraint: {}",
+                        names[idx_num]
+                    );
+                } else {
+                    panic!(
+                        "SHA256 sumcheck verification failed: constraint system is not satisfied. \
+                         This indicates the sumcheck proof verification generated invalid constraints.\n\
+                         Invalid constraint index: {}",
+                        idx
+                    );
+                }
+            } else {
+                panic!(
+                    "SHA256 sumcheck verification failed: constraint system is not satisfied. \
+                     This indicates the sumcheck proof verification generated invalid constraints.\n\
+                     Invalid constraint identifier: {}",
+                    idx
+                );
+            }
+        }
 
         // Also basic sanity: number of challenges collected matches rounds
         assert_eq!(res.1.len(), sumcheck_rounds,
@@ -695,12 +727,18 @@ mod tests {
         // For CCS folding, the expected sum should be zero for satisfied instances
         let expected_zero = FpVar::<Fr>::Constant(Fr::ZERO);
 
-        // Verify the sumcheck proof
+        // Create polynomial info for cubic test based on expected values
+        let polynomial_info = PolynomialInfo {
+            max_multiplicands: 3,
+            num_variables: 8,
+            num_terms: 2,
+        };
+
         let verification_result = verify_all_sumcheck::<ark_bn254::g1::Config, PoseidonSponge<Fr>>(
             &mut verifier_sponge_var,
             &sumcheck_evals_var,
             expected_zero,
-            sumcheck_proof.len(),
+            &polynomial_info,
         )
         .unwrap();
 

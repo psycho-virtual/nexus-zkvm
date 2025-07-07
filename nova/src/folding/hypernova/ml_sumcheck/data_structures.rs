@@ -58,6 +58,16 @@ pub struct PolynomialInfo {
     pub num_terms: usize,
 }
 
+impl std::fmt::Display for PolynomialInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "PolynomialInfo {{ max_multiplicands: {}, num_variables: {}, num_terms: {} }}",
+            self.max_multiplicands, self.num_variables, self.num_terms
+        )
+    }
+}
+
 impl Absorb for PolynomialInfo {
     fn to_sponge_bytes(&self, dest: &mut Vec<u8>) {
         unreachable!()

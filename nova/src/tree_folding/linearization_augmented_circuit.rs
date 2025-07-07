@@ -25,6 +25,7 @@ use std::{borrow::Borrow, fmt::Debug};
 
 use crate::{
     ccs::linearization::LCCSLinearization,
+    folding::hypernova::ml_sumcheck::PolynomialInfo,
     tree_folding::circuit::sumcheck::{compute_equality_polynomial, verify_all_sumcheck},
 };
 use ark_spartan::polycommitments::PolyCommitmentScheme;
@@ -235,7 +236,7 @@ where
     level = "debug",
     skip(random_oracle, input),
     fields(
-        sumcheck_rounds = sumcheck_rounds,
+        polynomial_info = ?polynomial_info,
         beta_len = input.linearization.beta.len(),
         vs_len = input.linearization.vs.len(),
         sumcheck_evals_len = input.linearization.sumcheck_evals.len()
@@ -245,7 +246,7 @@ where
 pub fn verify_linearization_in_circuit<G1, RO>(
     random_oracle: &mut RO::Var,
     input: &LinearizationAugmentedVar<G1, RO>,
-    sumcheck_rounds: usize,
+    polynomial_info: &PolynomialInfo,
 ) -> Result<LinearizationVerificationOutput<G1>, SynthesisError>
 where
     G1: SWCurveConfig,
@@ -253,6 +254,7 @@ where
     RO: SpongeWithGadget<G1::ScalarField>,
     RO::Var: CryptographicSpongeVar<G1::ScalarField, RO, Parameters = RO::Config>,
 {
+    let sumcheck_rounds = polynomial_info.num_variables;
     // --------------------------------------------------------------------
     // 1. Re-derive the challenges γ and β and enforce consistency with the
     //    values provided in the linearization proof.
@@ -327,7 +329,7 @@ where
         random_oracle,
         &input.linearization.sumcheck_evals,
         expected_sum_of_polynomial,
-        sumcheck_rounds,
+        polynomial_info,
     )?;
 
     // --------------------------------------------------------------------
@@ -713,7 +715,11 @@ mod tests {
         let result = verify_linearization_in_circuit::<ark_bn254::g1::Config, PoseidonSponge<Fr>>(
             &mut circuit_random_oracle,
             &input,
-            sumcheck_rounds,
+            &PolynomialInfo {
+                max_multiplicands: 3,
+                num_variables: sumcheck_rounds,
+                num_terms: 2,
+            },
         );
 
         // The circuit verification may still fail because even with our careful setup,
@@ -826,12 +832,12 @@ mod tests {
         circuit_random_oracle.absorb(&augmented_input.vk).unwrap();
 
         // Step 7: Run the augmented circuit verification
-        let sumcheck_rounds = native_input.linearization.sumcheck_rounds;
+        let _sumcheck_rounds = native_input.linearization.sumcheck_rounds;
         let verification_result =
             verify_linearization_in_circuit::<ark_bn254::g1::Config, PoseidonSponge<Fr>>(
                 &mut circuit_random_oracle,
                 &augmented_input,
-                sumcheck_rounds,
+                &native_input.linearization.polynomial.info(),
             );
 
         match verification_result {
@@ -1022,12 +1028,12 @@ mod tests {
         circuit_random_oracle.absorb(&augmented_input.vk).unwrap();
 
         // Step 7: Run the augmented circuit verification
-        let sumcheck_rounds = native_input.linearization.sumcheck_rounds;
+        let _sumcheck_rounds = native_input.linearization.sumcheck_rounds;
         let verification_result =
             verify_linearization_in_circuit::<ark_bn254::g1::Config, PoseidonSponge<Fr>>(
                 &mut circuit_random_oracle,
                 &augmented_input,
-                sumcheck_rounds,
+                &native_input.linearization.polynomial.info(),
             );
 
         match verification_result {
