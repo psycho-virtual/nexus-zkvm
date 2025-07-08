@@ -22,6 +22,8 @@ pub mod mle;
 pub mod lccs_fold;
 pub mod linearization;
 pub mod ccs_fold;
+pub mod challenge_generation;
+pub mod challenge_generation_circuit;
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum Error {

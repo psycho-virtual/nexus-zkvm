@@ -462,19 +462,6 @@ where
     random_oracle.squeeze_field_elements(1)[0]
 }
 
-/// Generate beta challenges for the sumcheck protocol
-pub fn generate_beta_challenges<G, RO>(random_oracle: &mut RO, s: usize) -> Vec<G::ScalarField>
-where
-    G: CurveGroup + AbsorbEmulatedFp<G::ScalarField>,
-    G::ScalarField: PrimeField + Absorb,
-    G::BaseField: PrimeField + Absorb,
-    G::Affine: Absorb,
-    RO: CryptographicSponge,
-{
-    // Generate the beta challenges
-    random_oracle.squeeze_field_elements(s)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -354,6 +354,7 @@ mod tests {
         CryptographicSponge,
     };
     use ark_ec::AdditiveGroup;
+    use ark_ff::Zero;
     use ark_r1cs_std::{alloc::AllocVar, fields::fp::FpVar, R1CSVar};
     use ark_relations::r1cs::ConstraintSystem;
     use ark_spartan::polycommitments::PolyCommitmentScheme;
@@ -460,11 +461,24 @@ mod tests {
         // Create SpongeVar for verifier
         let mut sponge_var = PoseidonSpongeVar::new(cs.clone(), &config);
         // The prover squeezed γ once and β sumcheck_rounds times before starting rounds.
-        sponge_var.squeeze_field_elements(1).unwrap();
-        sponge_var.squeeze_field_elements(sumcheck_rounds).unwrap();
+        // Use the circuit-based challenge generation
+        let gamma = crate::ccs::challenge_generation_circuit::generate_gamma_challenge_circuit::<
+            ark_bn254::g1::Config,
+            PoseidonSponge<Fr>,
+        >(&mut sponge_var)
+        .unwrap();
+        let beta = crate::ccs::challenge_generation_circuit::generate_beta_challenges_circuit::<
+            ark_bn254::g1::Config,
+            PoseidonSponge<Fr>,
+        >(&mut sponge_var, sumcheck_rounds)
+        .unwrap();
+
+        tracing::debug!(target: TEST_TARGET, "Generated γ: {:?}", gamma.value().unwrap_or_else(|_| Fr::zero()));
+        tracing::debug!(target: TEST_TARGET, "Generated β values: {:?}",
+                    beta.iter().map(|b| b.value().unwrap_or_else(|_| Fr::zero())).collect::<Vec<_>>());
 
         // Expected initial sum is zero for satisfied CCS instance
-        let expected_zero = FpVar::<Fr>::Constant(Fr::ZERO);
+        let expected_zero = FpVar::<Fr>::Constant(Fr::zero());
 
         let res = verify_all_sumcheck::<ark_bn254::g1::Config, PoseidonSponge<Fr>>(
             &mut cs,
@@ -561,18 +575,23 @@ mod tests {
         // Create SpongeVar for verifier
         let mut sponge_var = PoseidonSpongeVar::new(cs.clone(), &config);
         // The prover squeezed γ once and β sumcheck_rounds times before starting rounds
-        let gamma = sponge_var.squeeze_field_elements(1).unwrap();
-        let beta = sponge_var.squeeze_field_elements(sumcheck_rounds).unwrap();
+        // Use the circuit-based challenge generation
+        let (gamma, beta) =
+            crate::ccs::challenge_generation_circuit::generate_gamma_and_beta_challenges_circuit::<
+                ark_bn254::g1::Config,
+                PoseidonSponge<Fr>,
+            >(&mut sponge_var, sumcheck_rounds)
+            .unwrap();
 
-        tracing::debug!(target: TEST_TARGET, "Generated γ: {:?}", gamma[0].value().unwrap_or_else(|_| Fr::ZERO));
+        tracing::debug!(target: TEST_TARGET, "Generated γ: {:?}", gamma.value().unwrap_or_else(|_| Fr::zero()));
         tracing::debug!(target: TEST_TARGET, "Generated β values: {:?}",
-                    beta.iter().map(|b| b.value().unwrap_or_else(|_| Fr::ZERO)).collect::<Vec<_>>());
+                    beta.iter().map(|b| b.value().unwrap_or_else(|_| Fr::zero())).collect::<Vec<_>>());
 
         // Get polynomial info from the linearization result
         let polynomial_info = lin_res.linearization.polynomial.info();
 
         // Expected initial sum is zero for satisfied CCS instance
-        let expected_zero = FpVar::<Fr>::Constant(Fr::ZERO);
+        let expected_zero = FpVar::<Fr>::Constant(Fr::zero());
 
         let res = verify_all_sumcheck::<ark_bn254::g1::Config, PoseidonSponge<Fr>>(
             &mut cs,
