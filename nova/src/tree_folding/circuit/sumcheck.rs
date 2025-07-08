@@ -11,6 +11,7 @@ use ark_ec::AdditiveGroup;
 use ark_ec::{short_weierstrass::SWCurveConfig, CurveGroup};
 use ark_ff::{Field, PrimeField};
 use ark_r1cs_std::{
+    alloc::{AllocVar, AllocationMode},
     eq::EqGadget,
     fields::{fp::FpVar, FieldVar},
     R1CSVar,
@@ -25,9 +26,63 @@ use crate::ccs::Error;
 // Re–export the constant that specifies how many native field elements are
 // squeezed for the verifier challenge in each sum-check round.
 use crate::folding::hypernova::ml_sumcheck::protocol::verifier::SQUEEZE_NATIVE_ELEMENTS_NUM;
-use crate::folding::hypernova::ml_sumcheck::PolynomialInfo;
+use crate::folding::hypernova::ml_sumcheck::{PolynomialInfo, Proof as SumcheckProof};
 
 const LOG_TARGET: &str = "nexus-nova::tree_folding::circuit::sumcheck";
+
+// ----------------------------------------------------------------------------------
+//  SumcheckProofVar - R1CS variable for sumcheck proofs
+// ----------------------------------------------------------------------------------
+
+/// R1CS variable representing a sumcheck proof.
+/// This encapsulates the conversion from native sumcheck proofs (Vec<ProverMsg<F>>)
+/// to circuit variables, eliminating repetitive conversion code.
+#[derive(Clone, Debug)]
+pub struct SumcheckProofVar<F: PrimeField> {
+    /// Circuit variables for the evaluations from each round of the sumcheck proof.
+    /// evaluations[i][j] represents the j-th evaluation in the i-th round.
+    pub evaluations: Vec<Vec<FpVar<F>>>,
+}
+
+impl<F: PrimeField> SumcheckProofVar<F> {
+    /// Create a new SumcheckProofVar from pre-allocated evaluation variables
+    pub fn new(evaluations: Vec<Vec<FpVar<F>>>) -> Self {
+        Self { evaluations }
+    }
+
+    /// Get the number of rounds in this sumcheck proof
+    pub fn num_rounds(&self) -> usize {
+        self.evaluations.len()
+    }
+
+    /// Get the evaluations for a specific round
+    pub fn round_evaluations(&self, round: usize) -> &[FpVar<F>] {
+        &self.evaluations[round]
+    }
+}
+
+impl<F: PrimeField> AllocVar<SumcheckProof<F>, F> for SumcheckProofVar<F> {
+    fn new_variable<T: ark_std::borrow::Borrow<SumcheckProof<F>>>(
+        cs: impl Into<ark_relations::r1cs::Namespace<F>>,
+        f: impl FnOnce() -> Result<T, SynthesisError>,
+        mode: AllocationMode,
+    ) -> Result<Self, SynthesisError> {
+        let cs = cs.into().cs();
+        let proof = f()?.borrow().clone();
+        
+        let evaluations: Result<Vec<Vec<FpVar<F>>>, SynthesisError> = proof
+            .iter()
+            .map(|prover_msg| {
+                prover_msg.evaluations
+                    .iter()
+                    .map(|&eval| FpVar::new_variable(cs.clone(), || Ok(eval), mode))
+                    .collect()
+            })
+            .collect();
+        
+        Ok(Self::new(evaluations?))
+    }
+}
 
 /// Maximum cardinality (q) used by the polynomial interpolations (taken from
 /// the linearization circuit).  A value of **2** is sufficient for all of the
@@ -125,7 +180,7 @@ where
 
     // Compute Lagrange interpolation: p(r) = Σ_{i=0}^{len-1} p_i * L_i(r)
     // where L_i(r) = Π_{j≠i} (r - j) / (i - j)
-    let len = MAX_CARDINALITY + 2;
+    let len = evals.len();
     let zero = FpVar::<G1::ScalarField>::Constant(G1::ScalarField::ZERO);
     let one = FpVar::<G1::ScalarField>::Constant(G1::ScalarField::ONE);
 
@@ -174,9 +229,9 @@ where
 /// # Arguments
 ///
 /// * `random_oracle` - The cryptographic sponge for challenge generation
-/// * `sumcheck_evals` - The polynomial evaluations for each round
+/// * `sumcheck_proof` - The sumcheck proof containing evaluations for each round
 /// * `expected_sum_of_polynomial` - The expected initial sum to verify against
-/// * `sumcheck_rounds` - Number of sumcheck rounds to process
+/// * `polynomial_info` - Information about the polynomial being verified
 ///
 /// # Returns
 ///
@@ -184,11 +239,11 @@ where
 /// - The final expected value after all rounds
 /// - Vector of challenge points r_k from each round
 #[allow(clippy::type_complexity)]
-#[instrument(level = "debug", skip(random_oracle, sumcheck_evals))]
+#[instrument(level = "debug", skip(cs, random_oracle, sumcheck_proof))]
 pub fn verify_all_sumcheck<G1, RO>(
     cs: &mut ConstraintSystemRef<G1::ScalarField>,
     random_oracle: &mut RO::Var,
-    sumcheck_evals: &[Vec<FpVar<G1::ScalarField>>],
+    sumcheck_proof: &SumcheckProofVar<G1::ScalarField>,
     expected_sum_of_polynomial: FpVar<G1::ScalarField>,
     polynomial_info: &PolynomialInfo,
 ) -> Result<(FpVar<G1::ScalarField>, Vec<FpVar<G1::ScalarField>>), SynthesisError>
@@ -228,8 +283,8 @@ where
     for round in 0..sumcheck_rounds {
         ns!(cs, "Sumcheck Round");
         // Absorb polynomial evaluations (the prover message)
-        let evals = &sumcheck_evals[round];
-        random_oracle.absorb(evals)?;
+        let evals = sumcheck_proof.round_evaluations(round);
+        random_oracle.absorb(&evals.to_vec())?;
 
         // Fetch verifier challenge r_k and immediately absorb it per spec.
         let r_k = random_oracle.squeeze_field_elements(SQUEEZE_NATIVE_ELEMENTS_NUM)?[0].clone();
@@ -333,7 +388,7 @@ mod tests {
     use super::*;
     use crate::{
         ccs::{
-            ccs_fold::construct_combined_ccs_polynomial,
+            ccs_fold::{construct_combined_ccs_polynomial, MultiCCSProof},
             linearization::{
                 setup_linearization, synthesize_and_linearize_step,
                 synthesize_step_circuit_with_params, StepFunctionInput,
@@ -439,35 +494,19 @@ mod tests {
         .unwrap();
 
         let sumcheck_rounds = lin_res.linearization.sumcheck_rounds;
-        let sumcheck_evals_native: Vec<Vec<Fr>> = lin_res
-            .linearization
-            .sumcheck_proof
-            .iter()
-            .map(|msg| msg.evaluations.clone())
-            .collect();
 
-        // Build circuit witness for the evaluations
+        // Build circuit witness for the evaluations using SumcheckProofVar
         let mut cs = ConstraintSystem::<Fr>::new_ref();
-        let sumcheck_evals_var: Vec<Vec<FpVar<Fr>>> = sumcheck_evals_native
-            .iter()
-            .map(|round| {
-                round
-                    .iter()
-                    .map(|e| FpVar::new_witness(cs.clone(), || Ok(*e)).unwrap())
-                    .collect()
-            })
-            .collect();
+        let sumcheck_proof_var = SumcheckProofVar::new_witness(
+            cs.clone(),
+            || Ok(&lin_res.linearization.sumcheck_proof)
+        ).unwrap();
 
         // Create SpongeVar for verifier
         let mut sponge_var = PoseidonSpongeVar::new(cs.clone(), &config);
         // The prover squeezed γ once and β sumcheck_rounds times before starting rounds.
         // Use the circuit-based challenge generation
-        let gamma = crate::ccs::challenge_generation_circuit::generate_gamma_challenge_circuit::<
-            ark_bn254::g1::Config,
-            PoseidonSponge<Fr>,
-        >(&mut sponge_var)
-        .unwrap();
-        let beta = crate::ccs::challenge_generation_circuit::generate_beta_challenges_circuit::<
+        let (gamma, beta) = crate::ccs::challenge_generation_circuit::generate_gamma_and_beta_challenges_circuit::<
             ark_bn254::g1::Config,
             PoseidonSponge<Fr>,
         >(&mut sponge_var, sumcheck_rounds)
@@ -483,7 +522,7 @@ mod tests {
         let res = verify_all_sumcheck::<ark_bn254::g1::Config, PoseidonSponge<Fr>>(
             &mut cs,
             &mut sponge_var,
-            &sumcheck_evals_var,
+            &sumcheck_proof_var,
             expected_zero,
             &lin_res.linearization.polynomial.info(),
         )
@@ -553,35 +592,23 @@ mod tests {
             sumcheck_rounds,
             lin_res.linearization.sumcheck_proof.len()
         );
-        let sumcheck_evals_native: Vec<Vec<Fr>> = lin_res
-            .linearization
-            .sumcheck_proof
-            .iter()
-            .map(|msg| msg.evaluations.clone())
-            .collect();
 
-        // Build circuit witness for the evaluations
+        // Build circuit witness for the evaluations using SumcheckProofVar
         let mut cs = ConstraintSystem::<Fr>::new_ref();
-        let sumcheck_evals_var: Vec<Vec<FpVar<Fr>>> = sumcheck_evals_native
-            .iter()
-            .map(|round| {
-                round
-                    .iter()
-                    .map(|e| FpVar::new_witness(cs.clone(), || Ok(*e)).unwrap())
-                    .collect()
-            })
-            .collect();
+        let sumcheck_proof_var = SumcheckProofVar::new_witness(
+            cs.clone(),
+            || Ok(&lin_res.linearization.sumcheck_proof)
+        ).unwrap();
 
         // Create SpongeVar for verifier
         let mut sponge_var = PoseidonSpongeVar::new(cs.clone(), &config);
         // The prover squeezed γ once and β sumcheck_rounds times before starting rounds
         // Use the circuit-based challenge generation
-        let (gamma, beta) =
-            crate::ccs::challenge_generation_circuit::generate_gamma_and_beta_challenges_circuit::<
-                ark_bn254::g1::Config,
-                PoseidonSponge<Fr>,
-            >(&mut sponge_var, sumcheck_rounds)
-            .unwrap();
+        let (gamma, beta) = crate::ccs::challenge_generation_circuit::generate_gamma_and_beta_challenges_circuit::<
+            ark_bn254::g1::Config,
+            PoseidonSponge<Fr>,
+        >(&mut sponge_var, sumcheck_rounds)
+        .unwrap();
 
         tracing::debug!(target: TEST_TARGET, "Generated γ: {:?}", gamma.value().unwrap_or_else(|_| Fr::zero()));
         tracing::debug!(target: TEST_TARGET, "Generated β values: {:?}",
@@ -596,7 +623,7 @@ mod tests {
         let res = verify_all_sumcheck::<ark_bn254::g1::Config, PoseidonSponge<Fr>>(
             &mut cs,
             &mut sponge_var,
-            &sumcheck_evals_var,
+            &sumcheck_proof_var,
             expected_zero,
             &polynomial_info,
         )
@@ -728,23 +755,12 @@ mod tests {
 
         tracing::debug!(target: TEST_TARGET, "✓ Sumcheck proof generated with {} rounds", sumcheck_proof.len());
 
-        // Extract evaluations from the sumcheck proof
-        let sumcheck_evals_native: Vec<Vec<Fr>> = sumcheck_proof
-            .iter()
-            .map(|msg| msg.evaluations.clone())
-            .collect();
-
-        // Build circuit witness for the evaluations
+        // Build circuit witness for the evaluations using SumcheckProofVar
         let mut cs = ConstraintSystem::<Fr>::new_ref();
-        let sumcheck_evals_var: Vec<Vec<FpVar<Fr>>> = sumcheck_evals_native
-            .iter()
-            .map(|round| {
-                round
-                    .iter()
-                    .map(|e| FpVar::new_witness(cs.clone(), || Ok(*e)).unwrap())
-                    .collect()
-            })
-            .collect();
+        let sumcheck_proof_var = SumcheckProofVar::new_witness(
+            cs.clone(),
+            || Ok(&sumcheck_proof)
+        ).unwrap();
 
         // Create SpongeVar for verifier (fresh random oracle)
         let mut verifier_sponge_var = PoseidonSpongeVar::new(cs.clone(), &config);
@@ -758,7 +774,7 @@ mod tests {
         let verification_result = verify_all_sumcheck::<ark_bn254::g1::Config, PoseidonSponge<Fr>>(
             &mut cs,
             &mut verifier_sponge_var,
-            &sumcheck_evals_var,
+            &sumcheck_proof_var,
             expected_zero,
             &polynomial_info,
         )
@@ -885,23 +901,12 @@ mod tests {
 
         tracing::debug!(target: TEST_TARGET, "✓ Sumcheck proof generated with {} rounds", sumcheck_proof.len());
 
-        // Extract evaluations from the sumcheck proof
-        let sumcheck_evals_native: Vec<Vec<Fr>> = sumcheck_proof
-            .iter()
-            .map(|msg| msg.evaluations.clone())
-            .collect();
-
-        // Build circuit witness for the evaluations
+        // Build circuit witness for the evaluations using SumcheckProofVar
         let mut cs = ConstraintSystem::<Fr>::new_ref();
-        let sumcheck_evals_var: Vec<Vec<FpVar<Fr>>> = sumcheck_evals_native
-            .iter()
-            .map(|round| {
-                round
-                    .iter()
-                    .map(|e| FpVar::new_witness(cs.clone(), || Ok(*e)).unwrap())
-                    .collect()
-            })
-            .collect();
+        let sumcheck_proof_var = SumcheckProofVar::new_witness(
+            cs.clone(),
+            || Ok(&sumcheck_proof)
+        ).unwrap();
 
         // Create SpongeVar for verifier (fresh random oracle)
         let mut verifier_sponge_var = PoseidonSpongeVar::new(cs.clone(), &config);
@@ -915,7 +920,7 @@ mod tests {
         let verification_result = verify_all_sumcheck::<ark_bn254::g1::Config, PoseidonSponge<Fr>>(
             &mut cs,
             &mut verifier_sponge_var,
-            &sumcheck_evals_var,
+            &sumcheck_proof_var,
             expected_zero,
             &polynomial_info,
         )
@@ -942,5 +947,174 @@ mod tests {
         tracing::info!(target: TEST_TARGET, "✅ SHA256 chain CCS polynomial construction and sumcheck verification completed successfully");
         tracing::info!(target: TEST_TARGET, "Folded SHA256 chain with {} variables and {} products, verified with {} rounds",
             combined_poly.num_variables, combined_poly.products.len(), sumcheck_proof.len());
+    }
+
+    #[test]
+    fn test_verify_all_sumcheck_lccs_fold() {
+        let _guard = setup_test_tracing();
+        let mut rng = test_rng();
+
+        tracing::info!(target: TEST_TARGET, "🔗 Starting LCCS fold sumcheck verification test");
+
+        let config = poseidon_config::<Fr>();
+        let num_vars = 8; // 2^8 >= constraints for cubic circuit
+        let ck = {
+            let srs = Z::setup(num_vars, b"test", &mut rng).unwrap();
+            let keys = Z::trim(&srs, num_vars);
+            keys.ck
+        };
+
+        // Setup CCS shape for cubic circuit
+        let cs_setup = ConstraintSystem::<Fr>::new_ref();
+        let params =
+            setup_linearization::<G1, _>(cs_setup, CubicCircuit::<Fr> { _p: PhantomData }).unwrap();
+
+        tracing::debug!(target: TEST_TARGET, "✓ Setup linearization parameters");
+
+        // Create 4 CCS instances with different inputs
+        let inputs = vec![
+            StepFunctionInput {
+                i: Fr::from(0u64),
+                z_i: vec![Fr::from(1u64)],
+            },
+            StepFunctionInput {
+                i: Fr::from(1u64),
+                z_i: vec![Fr::from(10u64)],
+            },
+            StepFunctionInput {
+                i: Fr::from(2u64),
+                z_i: vec![Fr::from(100u64)],
+            },
+            StepFunctionInput {
+                i: Fr::from(3u64),
+                z_i: vec![Fr::from(1000u64)],
+            },
+        ];
+
+        let mut ccs_instances = Vec::new();
+        let mut witnesses = Vec::new();
+
+        for (idx, input) in inputs.iter().enumerate() {
+            let cs = ConstraintSystem::<Fr>::new_ref();
+            let (ccs_instance, witness) =
+                synthesize_step_circuit_with_params::<G1, Z, _>(cs, &params, input, &ck).unwrap();
+            ccs_instances.push(ccs_instance);
+            witnesses.push(witness);
+            tracing::debug!(target: TEST_TARGET, "✓ Created CCS instance {} with input {:?}", idx, input.z_i);
+        }
+
+        // Level 1: Fold pairs of CCS instances to LCCS
+        tracing::debug!(target: TEST_TARGET, "Level 1: Folding CCS pairs to LCCS instances");
+
+        let mut random_oracle1 = PoseidonSponge::new(&config);
+        let (_proof1, lccs1, witness_folded1) = MultiCCSProof::<G1>::prove_as_subprotocol(
+            &params.ccs_shape,
+            (&ccs_instances[0], &witnesses[0]),
+            (&ccs_instances[1], &witnesses[1]),
+            &mut random_oracle1,
+        )
+        .unwrap();
+
+        let mut random_oracle2 = PoseidonSponge::new(&config);
+        let (_proof2, lccs2, witness_folded2) = MultiCCSProof::<G1>::prove_as_subprotocol(
+            &params.ccs_shape,
+            (&ccs_instances[2], &witnesses[2]),
+            (&ccs_instances[3], &witnesses[3]),
+            &mut random_oracle2,
+        )
+        .unwrap();
+
+        tracing::debug!(target: TEST_TARGET, "✓ Level 1 folding completed - created two LCCS instances");
+
+        // Level 2: Now we have two LCCS instances, construct sumcheck polynomial for LCCS folding
+        tracing::debug!(target: TEST_TARGET, "Level 2: Constructing LCCS fold sumcheck polynomial");
+
+        // Generate gamma challenge for polynomial weighting using the standard challenge generation
+        let mut challenge_ro = PoseidonSponge::new(&config);
+        let gamma = crate::ccs::challenge_generation::generate_gamma_challenge::<Fr, _>(&mut challenge_ro);
+
+        // Construct the sumcheck polynomial for LCCS folding
+        let lccs_poly = crate::ccs::lccs_fold::construct_sumcheck_polynomial(
+            &params.ccs_shape,
+            &lccs1,
+            &lccs2,
+            &witness_folded1,
+            &witness_folded2,
+            &gamma,
+        );
+
+        tracing::debug!(target: TEST_TARGET, "✓ Constructed LCCS sumcheck polynomial");
+        tracing::debug!(target: TEST_TARGET, "LCCS polynomial num_variables: {}, products count: {}",
+            lccs_poly.num_variables, lccs_poly.products.len());
+
+        // Verify the polynomial has the expected structure
+        assert!(
+            !lccs_poly.products.is_empty(),
+            "LCCS polynomial should have at least one product term"
+        );
+
+        // Run the sumcheck protocol on the LCCS polynomial
+        let mut prover_ro = PoseidonSponge::new(&config);
+        let (sumcheck_proof, _prover_state) =
+            MLSumcheck::prove_as_subprotocol(&mut prover_ro, &lccs_poly);
+
+        tracing::debug!(target: TEST_TARGET, "✓ Sumcheck proof generated with {} rounds", sumcheck_proof.len());
+
+        // Build circuit witness for the evaluations using SumcheckProofVar
+        let mut cs = ConstraintSystem::<Fr>::new_ref();
+        let sumcheck_proof_var = SumcheckProofVar::new_witness(
+            cs.clone(),
+            || Ok(&sumcheck_proof)
+        ).unwrap();
+
+        // Create SpongeVar for verifier (fresh random oracle)
+        let mut verifier_sponge_var = PoseidonSpongeVar::new(cs.clone(), &config);
+
+        // For LCCS folding, compute the expected sum from the vs values
+        let expected_sum_native: Fr = (0..params.ccs_shape.num_matrices)
+            .map(|j| {
+                let gamma_j = gamma.pow([j as u64]);
+                let t = params.ccs_shape.num_matrices;
+                let gamma_t_plus_j = gamma.pow([(t + j) as u64]);
+                gamma_j * lccs1.vs[j] + gamma_t_plus_j * lccs2.vs[j]
+            })
+            .sum();
+
+        let expected_sum =
+            FpVar::<Fr>::new_witness(cs.clone(), || Ok(expected_sum_native)).unwrap();
+
+        // Get polynomial info from the actual constructed polynomial
+        let polynomial_info = lccs_poly.info();
+
+        let verification_result = verify_all_sumcheck::<ark_bn254::g1::Config, PoseidonSponge<Fr>>(
+            &mut cs,
+            &mut verifier_sponge_var,
+            &sumcheck_proof_var,
+            expected_sum,
+            &polynomial_info,
+        )
+        .unwrap();
+
+        tracing::debug!(target: TEST_TARGET, "✓ LCCS sumcheck verification completed successfully");
+        tracing::debug!(target: TEST_TARGET, "Final expected value: {:?}", verification_result.0.value().unwrap_or_else(|_| Fr::ZERO));
+        tracing::debug!(target: TEST_TARGET, "Challenges collected: {}", verification_result.1.len());
+
+        // Ensure constraint system is satisfied
+        assert!(
+            cs.is_satisfied().unwrap(),
+            "LCCS fold sumcheck verification failed: constraint system is not satisfied. \
+             This indicates the sumcheck proof verification generated invalid constraints."
+        );
+
+        // Verify we got the expected number of challenges
+        assert_eq!(
+            verification_result.1.len(),
+            sumcheck_proof.len(),
+            "Number of challenges should match number of sumcheck rounds"
+        );
+
+        tracing::info!(target: TEST_TARGET, "✅ LCCS fold sumcheck verification completed successfully");
+        tracing::info!(target: TEST_TARGET, "Hierarchical folding: 4 CCS → 2 LCCS → LCCS fold polynomial with {} variables and {} products, verified with {} rounds",
+            lccs_poly.num_variables, lccs_poly.products.len(), sumcheck_proof.len());
     }
 }

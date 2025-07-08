@@ -27,7 +27,7 @@ use std::{borrow::Borrow, fmt::Debug};
 use crate::{
     ccs::linearization::LCCSLinearization,
     folding::hypernova::ml_sumcheck::PolynomialInfo,
-    tree_folding::circuit::sumcheck::{compute_equality_polynomial, verify_all_sumcheck},
+    tree_folding::circuit::sumcheck::{compute_equality_polynomial, verify_all_sumcheck, SumcheckProofVar},
 };
 use ark_spartan::polycommitments::PolyCommitmentScheme;
 use tracing::instrument;
@@ -57,8 +57,8 @@ where
     pub beta: Vec<FpVar<G1::ScalarField>>,
     /// vs values from the LCCS instance
     pub vs: Vec<FpVar<G1::ScalarField>>,
-    /// Sumcheck evaluations
-    pub sumcheck_evals: Vec<Vec<FpVar<G1::ScalarField>>>,
+    /// Sumcheck proof
+    pub sumcheck_proof: SumcheckProofVar<G1::ScalarField>,
     /// Thetas
     pub thetas: Vec<FpVar<G1::ScalarField>>,
     /// Phantom data for RO type parameter
@@ -101,17 +101,11 @@ where
             .collect::<Result<Vec<_>, _>>()?;
 
         // Convert sumcheck proof to circuit variables
-        let sumcheck_evals = linearization
-            .sumcheck_proof
-            .iter()
-            .map(|round_msg| {
-                round_msg
-                    .evaluations
-                    .iter()
-                    .map(|&eval| FpVar::new_variable(cs.clone(), || Ok(eval), mode))
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let sumcheck_proof = SumcheckProofVar::new_variable(
+            cs.clone(),
+            || Ok(&linearization.sumcheck_proof),
+            mode
+        )?;
 
         // Use the vs values as thetas since they represent the matrix evaluations θ_j
         // In the linearization algorithm, θ_j = Σ_{y∈{0,1}^s'} M_j(r'_x, y) · z(y)
@@ -127,7 +121,7 @@ where
             gamma,
             beta,
             vs,
-            sumcheck_evals,
+            sumcheck_proof,
             thetas,
             _random_oracle: PhantomData,
         })
@@ -240,7 +234,7 @@ where
         polynomial_info = ?polynomial_info,
         beta_len = input.linearization.beta.len(),
         vs_len = input.linearization.vs.len(),
-        sumcheck_evals_len = input.linearization.sumcheck_evals.len()
+        sumcheck_proof_rounds = input.linearization.sumcheck_proof.num_rounds()
     ),
     target = LOG_TARGET
 )]
@@ -333,7 +327,7 @@ where
     let (expected, sumcheck_random_challenges) = verify_all_sumcheck::<G1, RO>(
         cs,
         random_oracle,
-        &input.linearization.sumcheck_evals,
+        &input.linearization.sumcheck_proof,
         expected_sum_of_polynomial,
         polynomial_info,
     )?;
@@ -636,7 +630,11 @@ mod tests {
         let eval_1 = expected_initial - eval_0; // Computed to ensure p_k(0) + p_k(1) = expected_initial
         let eval_2 = Fr::from(20); // Additional evaluation point, arbitrary choice
         let eval_3 = Fr::from(30); // Additional evaluation point, arbitrary choice
-        let sumcheck_evals = vec![vec![eval_0, eval_1, eval_2, eval_3]];
+        // Create a mock sumcheck proof structure
+        use crate::folding::hypernova::ml_sumcheck::protocol::prover::ProverMsg;
+        let sumcheck_proof = vec![ProverMsg {
+            evaluations: vec![eval_0, eval_1, eval_2, eval_3],
+        }];
 
         // Simulate the challenge generation that the circuit would perform
         // We'll use the same random oracle sequence as the circuit
@@ -692,15 +690,10 @@ mod tests {
                 .iter()
                 .map(|&v| FpVar::new_witness(cs.clone(), || Ok(v)).unwrap())
                 .collect(),
-            sumcheck_evals: sumcheck_evals
-                .iter()
-                .map(|round| {
-                    round
-                        .iter()
-                        .map(|&eval| FpVar::new_witness(cs.clone(), || Ok(eval)).unwrap())
-                        .collect()
-                })
-                .collect(),
+            sumcheck_proof: SumcheckProofVar::new_witness(
+                cs.clone(),
+                || Ok(&sumcheck_proof)
+            ).unwrap(),
             thetas: thetas
                 .iter()
                 .map(|&t| FpVar::new_witness(cs.clone(), || Ok(t)).unwrap())
