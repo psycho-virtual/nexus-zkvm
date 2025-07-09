@@ -378,39 +378,33 @@ where
     })?;
 
     // Step 4: Run the sum-check protocol and obtain the random evaluation point r_x
-    let (sumcheck_proof, r_x) = tracing::debug_span!(target: LOG_TARGET, "sumcheck_protocol").in_scope(|| {
-        tracing::debug!(target: LOG_TARGET, "Running ML sum-check protocol");
+    let (sumcheck_proof, r_x) = tracing::debug_span!(target: LOG_TARGET, "sumcheck_protocol")
+        .in_scope(|| {
+            tracing::debug!(target: LOG_TARGET, "Running ML sum-check protocol");
 
-        // The claimed sum should be 0 for a satisfied CCS instance
-        let (sumcheck_proof, prover_state) =
-            MLSumcheck::prove_as_subprotocol(random_oracle, &polynomial);
+            // The claimed sum should be 0 for a satisfied CCS instance
+            let (sumcheck_proof, prover_state) =
+                MLSumcheck::prove_as_subprotocol(random_oracle, &polynomial);
 
-        // Extract the random evaluation point from sum-check
-        let r_x = prover_state.randomness;
+            // Extract the random evaluation point from sum-check
+            let r_x = prover_state.randomness;
 
-        tracing::debug!(
-            target: LOG_TARGET,
-            "Sum-check protocol completed (proof rounds: {}, r_x length: {})",
-            sumcheck_proof.len(),
-            r_x.len()
-        );
+            tracing::debug!(
+                target: LOG_TARGET,
+                "Sum-check protocol completed (proof rounds: {}, r_x length: {})",
+                sumcheck_proof.len(),
+                r_x.len()
+            );
 
-        // Check the first round evaluation is 0
-        tracing::debug!(
-            target: LOG_TARGET,
-            "First round evaluations (claimed sum split): {:?}",
-            sumcheck_proof[0].evaluations
-        );
+            // Check the first round evaluation is 0
+            tracing::debug!(
+                target: LOG_TARGET,
+                "First round evaluations (claimed sum split): {:?}",
+                sumcheck_proof[0].evaluations
+            );
 
-        // Print all sumcheck evaluations for each round
-        tracing::debug!(
-            target: LOG_TARGET,
-            "Sumcheck evaluations by round: {:?}",
-            sumcheck_proof.iter().map(|round| round.evaluations.clone()).collect::<Vec<Vec<_>>>()
-        );
-
-        (sumcheck_proof, r_x)
-    });
+            (sumcheck_proof, r_x)
+        });
 
     // Assert that the first round sum evaluates to 0 (claimed sum)
     assert_eq!(

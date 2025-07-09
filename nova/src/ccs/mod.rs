@@ -49,7 +49,7 @@ impl Display for Error {
 }
 
 /// A type that holds the shape of the CCS matrices
-#[derive(Debug, Clone, PartialEq, Eq, CanonicalSerialize, CanonicalDeserialize)]
+#[derive(Clone, PartialEq, Eq, CanonicalSerialize, CanonicalDeserialize)]
 pub struct CCSShape<G: CurveGroup> {
     /// `m` in the CCS/HyperNova papers.
     pub num_constraints: usize,
@@ -78,6 +78,23 @@ pub struct CCSShape<G: CurveGroup> {
     pub Ms: Vec<SparseMatrix<G::ScalarField>>,
     /// Multisets of selector indices, each paired with a constant multiplier.
     pub cSs: Vec<(G::ScalarField, Vec<usize>)>,
+}
+
+impl<G: CurveGroup> fmt::Debug for CCSShape<G> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CCSShape")
+            .field("num_constraints", &self.num_constraints)
+            .field("num_vars", &self.num_vars)
+            .field("num_io", &self.num_io)
+            .field("num_matrices", &self.num_matrices)
+            .field("num_multisets", &self.num_multisets)
+            .field("max_cardinality", &self.max_cardinality)
+            .field("Ms", &format!("[{} matrices with {} total elements]", 
+                   self.Ms.len(), 
+                   self.Ms.iter().map(|m| m.len()).sum::<usize>()))
+            .field("cSs", &format!("[{} multisets]", self.cSs.len()))
+            .finish()
+    }
 }
 
 impl<G: CurveGroup> fmt::Display for CCSShape<G> {

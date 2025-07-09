@@ -1117,4 +1117,166 @@ mod tests {
         tracing::info!(target: TEST_TARGET, "Hierarchical folding: 4 CCS → 2 LCCS → LCCS fold polynomial with {} variables and {} products, verified with {} rounds",
             lccs_poly.num_variables, lccs_poly.products.len(), sumcheck_proof.len());
     }
+
+    #[test]
+    fn test_verify_all_sumcheck_sha256_hash_chain_fold() {
+        let _guard = setup_test_tracing();
+        let mut rng = test_rng();
+
+        tracing::info!(target: TEST_TARGET, "⛓️ Starting SHA256 hash chain hierarchical folding test");
+
+        let config = poseidon_config::<Fr>();
+        let num_vars = 18; // SHA256 requires significantly more variables for complex circuits
+        let ck = {
+            let srs = Z::setup(num_vars, b"test", &mut rng).unwrap();
+            let keys = Z::trim(&srs, num_vars);
+            keys.ck
+        };
+
+        // Setup CCS shape for SHA256 circuit
+        let cs_setup = ConstraintSystem::<Fr>::new_ref();
+        let params =
+            setup_linearization::<G1, _>(cs_setup, SequentialSha256Circuit::<Fr>::new()).unwrap();
+
+        tracing::debug!(target: TEST_TARGET, "✓ Setup SHA256 linearization parameters");
+
+        // Create SHA256 hash chain of size 4:
+        // h₁ = SHA256("genesis")
+        // h₂ = SHA256(h₁)  
+        // h₃ = SHA256(h₂)
+        // h₄ = SHA256(h₃)
+        let genesis_message = b"genesis_block_nexus_zkvm";
+        let h1 = calculate_sha256_native(genesis_message);
+        let h2 = calculate_sha256_native(&h1);
+        let h3 = calculate_sha256_native(&h2);
+        let h4 = calculate_sha256_native(&h3);
+
+        // Convert hashes to field elements
+        let h1_field = conversions::bytes_to_field::<Fr>(&h1);
+        let h2_field = conversions::bytes_to_field::<Fr>(&h2);
+        let h3_field = conversions::bytes_to_field::<Fr>(&h3);
+        let h4_field = conversions::bytes_to_field::<Fr>(&h4);
+
+        tracing::debug!(target: TEST_TARGET, "Hash chain created:");
+        tracing::debug!(target: TEST_TARGET, "  Genesis: {:?}", genesis_message);
+        tracing::debug!(target: TEST_TARGET, "  h₁: {}", h1.iter().map(|b| format!("{:02x}", b)).collect::<String>());
+        tracing::debug!(target: TEST_TARGET, "  h₂: {}", h2.iter().map(|b| format!("{:02x}", b)).collect::<String>());
+        tracing::debug!(target: TEST_TARGET, "  h₃: {}", h3.iter().map(|b| format!("{:02x}", b)).collect::<String>());
+        tracing::debug!(target: TEST_TARGET, "  h₄: {}", h4.iter().map(|b| format!("{:02x}", b)).collect::<String>());
+
+        // Create step inputs for the 4 hash computations
+        let inputs = vec![
+            StepFunctionInput { i: Fr::from(0u64), z_i: vec![h1_field] },
+            StepFunctionInput { i: Fr::from(1u64), z_i: vec![h2_field] },
+            StepFunctionInput { i: Fr::from(2u64), z_i: vec![h3_field] },
+            StepFunctionInput { i: Fr::from(3u64), z_i: vec![h4_field] },
+        ];
+
+        // Step 1: Create 4 CCS instances for each hash computation
+        let mut ccs_instances = Vec::new();
+        let mut witnesses = Vec::new();
+
+        for (idx, input) in inputs.iter().enumerate() {
+            let cs = ConstraintSystem::<Fr>::new_ref();
+            let (ccs_instance, witness) =
+                synthesize_step_circuit_with_params::<G1, Z, _>(cs, &params, input, &ck).unwrap();
+            ccs_instances.push(ccs_instance);
+            witnesses.push(witness);
+            tracing::debug!(target: TEST_TARGET, "✓ Created SHA256 CCS instance {} for hash h{}", idx, idx + 1);
+        }
+
+        // Step 2: Level 1 folding - Use MultiCCSProof to fold CCS pairs to LCCS
+        tracing::debug!(target: TEST_TARGET, "Level 1: Folding CCS pairs to LCCS instances using MultiCCSProof");
+
+        let mut random_oracle1 = PoseidonSponge::new(&config);
+        let (_proof1, lccs1, witness_folded1) = MultiCCSProof::<G1>::prove_as_subprotocol(
+            &params.ccs_shape,
+            (&ccs_instances[0], &witnesses[0]),
+            (&ccs_instances[1], &witnesses[1]),
+            &mut random_oracle1,
+        )
+        .unwrap();
+
+        let mut random_oracle2 = PoseidonSponge::new(&config);
+        let (_proof2, lccs2, witness_folded2) = MultiCCSProof::<G1>::prove_as_subprotocol(
+            &params.ccs_shape,
+            (&ccs_instances[2], &witnesses[2]),
+            (&ccs_instances[3], &witnesses[3]),
+            &mut random_oracle2,
+        )
+        .unwrap();
+
+        tracing::debug!(target: TEST_TARGET, "✓ Level 1 folding completed - created two LCCS instances");
+        tracing::debug!(target: TEST_TARGET, "  LCCS1 from (h₁,h₂): vs_len={}", lccs1.vs.len());
+        tracing::debug!(target: TEST_TARGET, "  LCCS2 from (h₃,h₄): vs_len={}", lccs2.vs.len());
+
+        // Step 3: Level 2 folding - LCCS fold between the two LCCS instances
+        tracing::debug!(target: TEST_TARGET, "Level 2: LCCS folding between the two LCCS instances");
+
+        // Generate gamma challenge for LCCS folding
+        let mut challenge_ro = PoseidonSponge::new(&config);
+        let gamma = crate::ccs::challenge_generation::generate_gamma_challenge::<Fr, _>(&mut challenge_ro);
+
+        // Construct the LCCS fold sumcheck polynomial
+        let lccs_poly = crate::ccs::lccs_fold::construct_sumcheck_polynomial(
+            &params.ccs_shape,
+            &lccs1,
+            &lccs2,
+            &witness_folded1,
+            &witness_folded2,
+            &gamma,
+        );
+
+        tracing::debug!(target: TEST_TARGET, "✓ Constructed LCCS fold polynomial");
+        tracing::debug!(target: TEST_TARGET, "LCCS polynomial: {} variables, {} products", lccs_poly.num_variables, lccs_poly.products.len());
+
+        // Step 4: Generate sumcheck proof for the LCCS folding operation
+        let mut prover_ro = PoseidonSponge::new(&config);
+        let (sumcheck_proof, _) = MLSumcheck::prove_as_subprotocol(&mut prover_ro, &lccs_poly);
+
+        tracing::debug!(target: TEST_TARGET, "✓ Generated LCCS fold sumcheck proof");
+        tracing::debug!(target: TEST_TARGET, "Sumcheck proof: {} rounds", sumcheck_proof.len());
+
+        // Step 5: Verify the LCCS fold sumcheck proof
+        tracing::debug!(target: TEST_TARGET, "Verifying LCCS fold sumcheck proof");
+
+        let mut cs = ConstraintSystem::<Fr>::new_ref();
+        let sumcheck_proof_var = SumcheckProofVar::new_witness(
+            cs.clone(),
+            || Ok(&sumcheck_proof)
+        ).unwrap();
+
+        let mut verifier_sponge_var = PoseidonSpongeVar::new(cs.clone(), &config);
+
+        // Compute expected sum for LCCS fold
+        let expected_sum_native: Fr = (0..params.ccs_shape.num_matrices)
+            .map(|j| {
+                let gamma_j = gamma.pow([j as u64]);
+                let t = params.ccs_shape.num_matrices;
+                let gamma_t_plus_j = gamma.pow([(t + j) as u64]);
+                gamma_j * lccs1.vs[j] + gamma_t_plus_j * lccs2.vs[j]
+            })
+            .sum();
+
+        let expected_sum = FpVar::<Fr>::new_witness(cs.clone(), || Ok(expected_sum_native)).unwrap();
+
+        let verification_result = verify_all_sumcheck::<ark_bn254::g1::Config, PoseidonSponge<Fr>>(
+            &mut cs,
+            &mut verifier_sponge_var,
+            &sumcheck_proof_var,
+            expected_sum,
+            &lccs_poly.info(),
+        ).unwrap();
+
+        assert!(cs.is_satisfied().unwrap(), "LCCS fold verification failed");
+        tracing::debug!(target: TEST_TARGET, "✓ LCCS fold verification completed successfully");
+
+        // Verify we got the expected number of challenges
+        assert_eq!(verification_result.1.len(), sumcheck_proof.len());
+
+        tracing::info!(target: TEST_TARGET, "✅ SHA256 hash chain hierarchical folding completed successfully");
+        tracing::info!(target: TEST_TARGET, "Folding structure: 4 SHA256 CCS → 2 LCCS → 1 LCCS fold");
+        tracing::info!(target: TEST_TARGET, "LCCS fold: {} rounds, {} constraints", verification_result.1.len(), cs.num_constraints());
+        tracing::info!(target: TEST_TARGET, "Total hash chain length: 4 (genesis → h₁ → h₂ → h₃ → h₄)");
+    }
 }
