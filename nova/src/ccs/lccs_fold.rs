@@ -379,7 +379,15 @@ where
 }
 
 /// Generate a complete sum-check-based proof for folding two LCCS instances
-#[instrument(skip_all, name = "prove_folding")]
+#[instrument(skip_all, name = "prove_folding", fields(
+    witness1_len = witness1.W.len(),
+    witness2_len = witness2.W.len(),
+    lccs1_vs_len = lccs1.vs.len(),
+    lccs2_vs_len = lccs2.vs.len(),
+    shape_num_constraints = shape.num_constraints,
+    shape_num_vars = shape.num_vars,
+    shape_num_matrices = shape.num_matrices
+))]
 pub fn prove_folding<G, C, RO>(
     random_oracle: &mut RO,
     shape: &CCSShape<G>,

@@ -69,17 +69,18 @@ impl<F: PrimeField> AllocVar<SumcheckProof<F>, F> for SumcheckProofVar<F> {
     ) -> Result<Self, SynthesisError> {
         let cs = cs.into().cs();
         let proof = f()?.borrow().clone();
-        
+
         let evaluations: Result<Vec<Vec<FpVar<F>>>, SynthesisError> = proof
             .iter()
             .map(|prover_msg| {
-                prover_msg.evaluations
+                prover_msg
+                    .evaluations
                     .iter()
                     .map(|&eval| FpVar::new_variable(cs.clone(), || Ok(eval), mode))
                     .collect()
             })
             .collect();
-        
+
         Ok(Self::new(evaluations?))
     }
 }
@@ -497,20 +498,20 @@ mod tests {
 
         // Build circuit witness for the evaluations using SumcheckProofVar
         let mut cs = ConstraintSystem::<Fr>::new_ref();
-        let sumcheck_proof_var = SumcheckProofVar::new_witness(
-            cs.clone(),
-            || Ok(&lin_res.linearization.sumcheck_proof)
-        ).unwrap();
+        let sumcheck_proof_var =
+            SumcheckProofVar::new_witness(cs.clone(), || Ok(&lin_res.linearization.sumcheck_proof))
+                .unwrap();
 
         // Create SpongeVar for verifier
         let mut sponge_var = PoseidonSpongeVar::new(cs.clone(), &config);
         // The prover squeezed γ once and β sumcheck_rounds times before starting rounds.
         // Use the circuit-based challenge generation
-        let (gamma, beta) = crate::ccs::challenge_generation_circuit::generate_gamma_and_beta_challenges_circuit::<
-            ark_bn254::g1::Config,
-            PoseidonSponge<Fr>,
-        >(&mut sponge_var, sumcheck_rounds)
-        .unwrap();
+        let (gamma, beta) =
+            crate::ccs::challenge_generation_circuit::generate_gamma_and_beta_challenges_circuit::<
+                ark_bn254::g1::Config,
+                PoseidonSponge<Fr>,
+            >(&mut sponge_var, sumcheck_rounds)
+            .unwrap();
 
         tracing::debug!(target: TEST_TARGET, "Generated γ: {:?}", gamma.value().unwrap_or_else(|_| Fr::zero()));
         tracing::debug!(target: TEST_TARGET, "Generated β values: {:?}",
@@ -595,20 +596,20 @@ mod tests {
 
         // Build circuit witness for the evaluations using SumcheckProofVar
         let mut cs = ConstraintSystem::<Fr>::new_ref();
-        let sumcheck_proof_var = SumcheckProofVar::new_witness(
-            cs.clone(),
-            || Ok(&lin_res.linearization.sumcheck_proof)
-        ).unwrap();
+        let sumcheck_proof_var =
+            SumcheckProofVar::new_witness(cs.clone(), || Ok(&lin_res.linearization.sumcheck_proof))
+                .unwrap();
 
         // Create SpongeVar for verifier
         let mut sponge_var = PoseidonSpongeVar::new(cs.clone(), &config);
         // The prover squeezed γ once and β sumcheck_rounds times before starting rounds
         // Use the circuit-based challenge generation
-        let (gamma, beta) = crate::ccs::challenge_generation_circuit::generate_gamma_and_beta_challenges_circuit::<
-            ark_bn254::g1::Config,
-            PoseidonSponge<Fr>,
-        >(&mut sponge_var, sumcheck_rounds)
-        .unwrap();
+        let (gamma, beta) =
+            crate::ccs::challenge_generation_circuit::generate_gamma_and_beta_challenges_circuit::<
+                ark_bn254::g1::Config,
+                PoseidonSponge<Fr>,
+            >(&mut sponge_var, sumcheck_rounds)
+            .unwrap();
 
         tracing::debug!(target: TEST_TARGET, "Generated γ: {:?}", gamma.value().unwrap_or_else(|_| Fr::zero()));
         tracing::debug!(target: TEST_TARGET, "Generated β values: {:?}",
@@ -757,10 +758,8 @@ mod tests {
 
         // Build circuit witness for the evaluations using SumcheckProofVar
         let mut cs = ConstraintSystem::<Fr>::new_ref();
-        let sumcheck_proof_var = SumcheckProofVar::new_witness(
-            cs.clone(),
-            || Ok(&sumcheck_proof)
-        ).unwrap();
+        let sumcheck_proof_var =
+            SumcheckProofVar::new_witness(cs.clone(), || Ok(&sumcheck_proof)).unwrap();
 
         // Create SpongeVar for verifier (fresh random oracle)
         let mut verifier_sponge_var = PoseidonSpongeVar::new(cs.clone(), &config);
@@ -903,10 +902,8 @@ mod tests {
 
         // Build circuit witness for the evaluations using SumcheckProofVar
         let mut cs = ConstraintSystem::<Fr>::new_ref();
-        let sumcheck_proof_var = SumcheckProofVar::new_witness(
-            cs.clone(),
-            || Ok(&sumcheck_proof)
-        ).unwrap();
+        let sumcheck_proof_var =
+            SumcheckProofVar::new_witness(cs.clone(), || Ok(&sumcheck_proof)).unwrap();
 
         // Create SpongeVar for verifier (fresh random oracle)
         let mut verifier_sponge_var = PoseidonSpongeVar::new(cs.clone(), &config);
@@ -1031,7 +1028,8 @@ mod tests {
 
         // Generate gamma challenge for polynomial weighting using the standard challenge generation
         let mut challenge_ro = PoseidonSponge::new(&config);
-        let gamma = crate::ccs::challenge_generation::generate_gamma_challenge::<Fr, _>(&mut challenge_ro);
+        let gamma =
+            crate::ccs::challenge_generation::generate_gamma_challenge::<Fr, _>(&mut challenge_ro);
 
         // Construct the sumcheck polynomial for LCCS folding
         let lccs_poly = crate::ccs::lccs_fold::construct_sumcheck_polynomial(
@@ -1062,10 +1060,8 @@ mod tests {
 
         // Build circuit witness for the evaluations using SumcheckProofVar
         let mut cs = ConstraintSystem::<Fr>::new_ref();
-        let sumcheck_proof_var = SumcheckProofVar::new_witness(
-            cs.clone(),
-            || Ok(&sumcheck_proof)
-        ).unwrap();
+        let sumcheck_proof_var =
+            SumcheckProofVar::new_witness(cs.clone(), || Ok(&sumcheck_proof)).unwrap();
 
         // Create SpongeVar for verifier (fresh random oracle)
         let mut verifier_sponge_var = PoseidonSpongeVar::new(cs.clone(), &config);
@@ -1142,7 +1138,7 @@ mod tests {
 
         // Create SHA256 hash chain of size 4:
         // h₁ = SHA256("genesis")
-        // h₂ = SHA256(h₁)  
+        // h₂ = SHA256(h₁)
         // h₃ = SHA256(h₂)
         // h₄ = SHA256(h₃)
         let genesis_message = b"genesis_block_nexus_zkvm";
@@ -1215,7 +1211,8 @@ mod tests {
 
         // Generate gamma challenge for LCCS folding
         let mut challenge_ro = PoseidonSponge::new(&config);
-        let gamma = crate::ccs::challenge_generation::generate_gamma_challenge::<Fr, _>(&mut challenge_ro);
+        let gamma =
+            crate::ccs::challenge_generation::generate_gamma_challenge::<Fr, _>(&mut challenge_ro);
 
         // Construct the LCCS fold sumcheck polynomial
         let lccs_poly = crate::ccs::lccs_fold::construct_sumcheck_polynomial(
@@ -1241,10 +1238,8 @@ mod tests {
         tracing::debug!(target: TEST_TARGET, "Verifying LCCS fold sumcheck proof");
 
         let mut cs = ConstraintSystem::<Fr>::new_ref();
-        let sumcheck_proof_var = SumcheckProofVar::new_witness(
-            cs.clone(),
-            || Ok(&sumcheck_proof)
-        ).unwrap();
+        let sumcheck_proof_var =
+            SumcheckProofVar::new_witness(cs.clone(), || Ok(&sumcheck_proof)).unwrap();
 
         let mut verifier_sponge_var = PoseidonSpongeVar::new(cs.clone(), &config);
 
@@ -1258,7 +1253,8 @@ mod tests {
             })
             .sum();
 
-        let expected_sum = FpVar::<Fr>::new_witness(cs.clone(), || Ok(expected_sum_native)).unwrap();
+        let expected_sum =
+            FpVar::<Fr>::new_witness(cs.clone(), || Ok(expected_sum_native)).unwrap();
 
         let verification_result = verify_all_sumcheck::<ark_bn254::g1::Config, PoseidonSponge<Fr>>(
             &mut cs,
@@ -1266,7 +1262,8 @@ mod tests {
             &sumcheck_proof_var,
             expected_sum,
             &lccs_poly.info(),
-        ).unwrap();
+        )
+        .unwrap();
 
         assert!(cs.is_satisfied().unwrap(), "LCCS fold verification failed");
         tracing::debug!(target: TEST_TARGET, "✓ LCCS fold verification completed successfully");
