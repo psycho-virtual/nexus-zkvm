@@ -6,27 +6,14 @@ Core data structures, traits, and function signatures for implementing chunked S
 
 ## Core Data Structures
 
-### PermutationTuple
-
-```rust
-use ark_ff::Field;
-
-#[derive(Clone, Debug)]
-pub struct PermutationTuple<F: Field> {
-    pub local_idx: usize,
-    pub value: F,
-    pub next_global_idx: usize,
-}
-```
-
-### SHA256LeafData
+### SHA256ChainRequest
 
 ```rust
 use ark_std::vec::Vec;
 
-/// Initial leaf data before permutation calculations
+/// Initial request for SHA256 chain computation before permutation calculations
 #[derive(Clone, Debug)]
-pub struct SHA256LeafData<F: Field> {
+pub struct SHA256ChainRequest<F: Field> {
     pub id: usize,
     pub num_sha256: usize,
     pub input: Vec<F>,
@@ -34,12 +21,12 @@ pub struct SHA256LeafData<F: Field> {
 }
 ```
 
-### SHA256LeafJob
+### SHA256ChainMangroveComputation
 
 ```rust
-/// Complete leaf job after permutation calculations
+/// Complete computation with all partial permutations
 #[derive(Clone, Debug)]
-pub struct SHA256LeafJob<F: Field> {
+pub struct SHA256ChainMangroveComputation<F: Field> {
     pub id: usize,
     pub start_permutation_idx: usize
     pub num_sha256: usize,
@@ -51,14 +38,14 @@ pub struct SHA256LeafJob<F: Field> {
     // IMPORTANT: There is an invariant that the number of elements for input and output would match the size of input_permutation and output_permutation
 }
 
-impl<F: Field> SHA256LeafJob<F> {
-    pub fn from_data_with_permutations(
-        data: SHA256LeafData<F>,
+impl<F: Field> SHA256ChainMangroveComputation<F> {
+    pub fn from_request_with_permutations(
+        request: SHA256ChainRequest<F>,
         input_permutation: Vec<PermutationTuple<F>>,
         output_permutation: Vec<PermutationTuple<F>>,
     ) -> Self;
 
-    pub fn data(&self) -> SHA256LeafData<F>;
+    pub fn request(&self) -> SHA256ChainRequest<F>;
 }
 ```
 
@@ -79,12 +66,12 @@ pub struct SHA256ChainBuilder<F: Field> {
     pub output_vector_size: usize,
 }
 
-fn create_leafs(leafData: SHA256LeafData<F>) -> SHA256LeafJob<F>
+fn create_leafs(request: SHA256ChainRequest<F>) -> SHA256ChainMangroveComputation<F>
 
 impl<F: Field> SHA256ChainBuilder<F> {
     pub fn new(chain_length: usize, num_leafs: usize) -> Self;
-    pub fn generate_leaf_data(&self, initial_input: &[u8]) -> Vec<SHA256LeafData<F>>;
-    pub fn generate_leaf_jobs(&self, leaf_data: Vec<SHA256LeafData<F>>) -> Vec<SHA256LeafJob<F>>;
+    pub fn generate_requests(&self, initial_input: &[u8]) -> Vec<SHA256ChainRequest<F>>;
+    pub fn compute_mangrove_constraints(&self, requests: Vec<SHA256ChainRequest<F>>) -> Vec<SHA256ChainMangroveComputation<F>>;
 }
 ```
 
@@ -160,6 +147,34 @@ impl<F: PrimeField> IntoFpVarVec<F> for SHA256Var<F> {
             .flat_map(|group| group.iter().cloned())
             .collect()
     }
+}
+
+/// Native Mangrove leaf data structure for any input/output types
+/// This is the native computation equivalent of MangroveLeafVar
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct MangroveLeafData<F: PrimeField, Input, Output>
+where
+    Input: Clone,
+    Output: Clone,
+{
+    /// Alpha challenge for permutation argument
+    pub alpha: F,
+    /// Beta challenge for permutation argument
+    pub beta: F,
+
+    /// Input data
+    pub input: Input,
+    /// Permutation indices for input
+    pub permutation_input_index: Vec<F>,
+    /// Next permutation indices for input
+    pub permutation_input_next_index: Vec<F>,
+
+    /// Output data
+    pub output: Output,
+    /// Permutation indices for output
+    pub permutation_output_index: Vec<F>,
+    /// Next permutation indices for output
+    pub permutation_output_next_index: Vec<F>,
 }
 
 /// Generic Mangrove constraint structure for any circuit input/output types
@@ -401,6 +416,8 @@ fn compute_permutation_partial_products<F: PrimeField>(
     beta: &FpVar<F>,
 ) -> Result<PermutationPartialProducts<F>, SynthesisError>;
 ```
+
+
 
 ## Key Design Benefits
 

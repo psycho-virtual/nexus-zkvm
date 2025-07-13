@@ -1,14 +1,18 @@
 use super::{FnCircuit, IntoFpVarVec};
-use crate::circuits::nova::StepCircuit;
-use crate::tree_folding::circuit::sha256::{calculate_sha256_native, conversions, Sha256Circuit};
 use ark_ff::PrimeField;
 use ark_r1cs_std::{
-    fields::{fp::FpVar, FieldVar},
+    fields::fp::FpVar,
     R1CSVar,
 };
 use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
 use std::marker::PhantomData;
 use tracing::{debug, info, info_span, instrument};
+
+// Import the SHA-256 gadget
+use ark_crypto_primitives::crh::{
+    sha256::constraints::Sha256Gadget,
+    CRHSchemeGadget,
+};
 
 const LOG_TARGET: &str = "nexus-nova::tree_folding::mangrove::circuit::sha256_leaf";
 
@@ -24,9 +28,14 @@ pub struct Sha256LeafCircuit<F: PrimeField> {
 impl<F: PrimeField> Sha256LeafCircuit<F> {
     /// Create a new SHA-256 leaf circuit
     pub fn new(num_iterations: usize) -> Self {
-        Self { num_iterations, _phantom: PhantomData }
+        Self { 
+            num_iterations, 
+            _phantom: PhantomData 
+        }
     }
 }
+
+use super::sha256_var::Sha256Var;
 
 // Implement IntoFpVarVec for FpVar (our input/output type)
 impl<F: PrimeField> IntoFpVarVec<F> for FpVar<F> {
@@ -35,83 +44,58 @@ impl<F: PrimeField> IntoFpVarVec<F> for FpVar<F> {
     }
 }
 
-impl<F: PrimeField> FnCircuit<F, FpVar<F>, FpVar<F>> for Sha256LeafCircuit<F> {
+impl<F: PrimeField> FnCircuit<F, Sha256Var<F>, Sha256Var<F>> for Sha256LeafCircuit<F> {
     #[instrument(target = LOG_TARGET, skip(self, cs, input))]
     fn generate_constraints(
         &self,
         cs: ConstraintSystemRef<F>,
-        input: &FpVar<F>,
-    ) -> Result<FpVar<F>, SynthesisError> {
+        input: &Sha256Var<F>,
+    ) -> Result<Sha256Var<F>, SynthesisError> {
         let span = info_span!(target: LOG_TARGET, "constraint_generation");
         let _enter = span.enter();
 
         info!(target: LOG_TARGET, "Starting constraint generation for SHA-256 leaf");
 
-        // Extract the current state
-        let current_state = input;
+        // Start with the input bytes
+        let mut state = input.bytes.clone();
 
-        // Get the value of the current state if available
-        let mut state_bytes = match current_state.value() {
-            Ok(val) => {
-                let bytes = conversions::field_to_bytes(&val);
-                debug!(
-                    target: LOG_TARGET,
-                    "Input state value available, converted to bytes of length {}, hex: {}",
-                    bytes.len(),
-                    hex::encode(&bytes)
-                );
-                bytes
-            }
-            Err(_) => {
-                debug!(target: LOG_TARGET, "Input state value not available, using default bytes");
-                vec![0u8; 32] // Default for constraint generation
-            }
-        };
+        debug!(
+            target: LOG_TARGET,
+            "Input state: {} bytes",
+            state.len()
+        );
 
-        let mut result = current_state.clone();
+        // Create SHA-256 parameters (constant)
+        let params_var = ark_crypto_primitives::crh::sha256::constraints::UnitVar::<F>::default();
 
-        // Perform the chain of SHA-256 computations
-        for iter in 0..self.num_iterations {
+        // Unrolled hash chain
+        for i in 0..self.num_iterations {
             debug!(
                 target: LOG_TARGET,
-                "Creating SHA-256 circuit instance for iteration {}",
-                iter + 1
+                "SHA-256 iteration {}/{}",
+                i + 1,
+                self.num_iterations
             );
 
-            // Create a SHA-256 circuit for this iteration using the current state as input
-            let sha_circuit = Sha256Circuit::<F>::new(&state_bytes);
+            // Use the SHA-256 gadget to compute the hash
+            let digest_var = Sha256Gadget::<F>::evaluate(&params_var, &state)?;
+            
+            // Extract the bytes from DigestVar (it contains Vec<UInt8<F>>)
+            // The arkworks SHA256 gadget returns DigestVar which wraps the bytes
+            state = digest_var.0;
 
+            // The output should already be 32 bytes, but let's make sure
+            assert_eq!(state.len(), 32, "SHA-256 output should be 32 bytes");
+            
             debug!(
                 target: LOG_TARGET,
-                "Generating constraints for SHA-256 operation iteration {}",
-                iter + 1
+                "Iteration {} completed",
+                i + 1,
             );
-
-            // Generate constraints for the SHA-256 operation directly
-            let dummy_fp_var = FpVar::<F>::zero();
-            let empty_vec = vec![];
-
-            let hash_result = {
-                let span = info_span!(target: LOG_TARGET, "sha256_constraints", iteration = iter + 1);
-                let _enter = span.enter();
-                sha_circuit.generate_constraints(cs.clone(), &dummy_fp_var, &empty_vec)?
-            };
-
-            // Update result with the new hash
-            result = hash_result[0].clone();
-
-            // Update state_bytes for next iteration (if we have witness values)
-            if let Ok(val) = result.value() {
-                state_bytes = conversions::field_to_bytes(&val);
-                debug!(
-                    target: LOG_TARGET,
-                    "Iteration {} hash computed, {} bytes, hex: {}",
-                    iter + 1,
-                    state_bytes.len(),
-                    hex::encode(&state_bytes)
-                );
-            }
         }
+
+        // Create result Sha256Var
+        let result = Sha256Var::new(state)?;
 
         // Log constraint system information
         let num_constraints = cs.num_constraints();
@@ -133,6 +117,8 @@ impl<F: PrimeField> FnCircuit<F, FpVar<F>, FpVar<F>> for Sha256LeafCircuit<F> {
 /// Run a chain of SHA-256 operations natively for comparison
 #[instrument(target = LOG_TARGET, skip(initial_data))]
 pub fn run_native_sha256_chain(initial_data: &[u8], iterations: usize) -> Vec<u8> {
+    use sha2::{Digest, Sha256 as NativeSha256};
+
     let span = info_span!(
         target: LOG_TARGET,
         "native_sha256_chain",
@@ -150,19 +136,12 @@ pub fn run_native_sha256_chain(initial_data: &[u8], iterations: usize) -> Vec<u8
     let mut current_hash = initial_data.to_vec();
     
     for i in 0..iterations {
-        current_hash = {
-            let span = info_span!(target: LOG_TARGET, "hash_step", step = i + 1, total_steps = iterations);
-            let _enter = span.enter();
-            calculate_sha256_native(&current_hash)
-        };
+        let mut hasher = NativeSha256::new();
+        hasher.update(&current_hash);
+        current_hash = hasher.finalize().to_vec();
 
-        let hash_hex = current_hash
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect::<Vec<_>>()
-            .join("");
         debug!(target: LOG_TARGET, "Native step {}/{}: Hash calculated", i + 1, iterations);
-        debug!(target: LOG_TARGET, "    Hash at step {} (hex): {}", i + 1, hash_hex);
+        debug!(target: LOG_TARGET, "    Hash at step {} (hex): {}", i + 1, hex::encode(&current_hash));
     }
 
     current_hash
@@ -207,12 +186,14 @@ mod tests {
         
         let cs = ConstraintSystem::<Fr>::new_ref();
         
-        // Create initial input
-        let initial_data = b"test input";
-        let initial_hash = calculate_sha256_native(initial_data);
-        let initial_field = conversions::bytes_to_field::<Fr>(&initial_hash);
+        // Create initial input as Sha256Var
+        let initial_data = vec![1u8; 32]; // Use 32 bytes directly
         
-        let input_var = FpVar::<Fr>::new_witness(cs.clone(), || Ok(initial_field)).unwrap();
+        let input_var = Sha256Var::<Fr>::new_variable(
+            cs.clone(),
+            || Ok(initial_data),
+            ark_r1cs_std::alloc::AllocationMode::Witness,
+        ).unwrap();
         
         let result = circuit.generate_constraints(cs.clone(), &input_var);
         
@@ -231,67 +212,49 @@ mod tests {
         // Verify manually
         let mut expected = initial_data.to_vec();
         for _ in 0..iterations {
-            expected = calculate_sha256_native(&expected);
+            use sha2::{Digest, Sha256 as NativeSha256};
+            let mut hasher = NativeSha256::new();
+            hasher.update(&expected);
+            expected = hasher.finalize().to_vec();
         }
         
         assert_eq!(final_hash, expected);
     }
-
 
     #[test]
     fn test_circuit_matches_native() {
         let _guard = setup_test_tracing();
         tracing::info!(target: LOG_TARGET, "Starting test_circuit_matches_native");
         
-        // The issue is that field_to_bytes doesn't properly invert bytes_to_field
-        // So let's test with a simpler approach: start with known bytes that round-trip correctly
-        
         let iterations = 2;
         let circuit = Sha256LeafCircuit::<Fr>::new(iterations);
         
         let cs = ConstraintSystem::<Fr>::new_ref();
         
-        // Start with zero bytes - these should round-trip correctly
-        let initial_bytes = vec![0u8; 32];
-        let initial_field = conversions::bytes_to_field::<Fr>(&initial_bytes);
+        // Start with 32 bytes - required for Sha256Var
+        let initial_bytes = vec![1u8; 32];
         tracing::debug!(target: LOG_TARGET, "Initial bytes: {:?}", hex::encode(&initial_bytes));
-        tracing::debug!(target: LOG_TARGET, "Initial field: {:?}", initial_field);
         
-        // Verify round-trip works for our starting point
-        let roundtrip_bytes = conversions::field_to_bytes(&initial_field);
-        tracing::debug!(target: LOG_TARGET, "Roundtrip bytes: {:?}", hex::encode(&roundtrip_bytes));
-        
-        let input_var = FpVar::<Fr>::new_witness(cs.clone(), || Ok(initial_field)).unwrap();
+        let input_var = Sha256Var::<Fr>::new_variable(
+            cs.clone(),
+            || Ok(initial_bytes.clone()),
+            ark_r1cs_std::alloc::AllocationMode::Witness,
+        ).unwrap();
         
         // Run circuit
         let circuit_result = circuit.generate_constraints(cs.clone(), &input_var).unwrap();
         let circuit_output = circuit_result.value().unwrap();
-        tracing::debug!(target: LOG_TARGET, "Circuit output: {:?}", circuit_output);
+        tracing::debug!(target: LOG_TARGET, "Circuit output bytes: {:?}", hex::encode(&circuit_output));
         
-        // For verification, we need to simulate exactly what the circuit does:
-        // It starts with field_to_bytes of the input, not the original bytes
-        let mut current_bytes = roundtrip_bytes;
-        for i in 0..iterations {
-            let hash = calculate_sha256_native(&current_bytes);
-            tracing::debug!(target: LOG_TARGET, "Native iteration {} input: {:?}", i, hex::encode(&current_bytes));
-            tracing::debug!(target: LOG_TARGET, "Native iteration {} hash: {:?}", i, hex::encode(&hash));
-            
-            // Convert hash to field and back to bytes (to match circuit behavior)
-            let hash_field = conversions::bytes_to_field::<Fr>(&hash);
-            current_bytes = conversions::field_to_bytes(&hash_field);
-        }
+        // Run native computation for comparison
+        let native_output = run_native_sha256_chain(&initial_bytes, iterations);
         
-        // The expected output is the final hash converted to field
-        let final_hash = calculate_sha256_native(&current_bytes);
-        let expected_field = conversions::bytes_to_field::<Fr>(&final_hash);
-        tracing::debug!(target: LOG_TARGET, "Expected field: {:?}", expected_field);
-        
-        // For now, let's just verify the circuit ran successfully
+        // Verify the circuit ran successfully
         assert!(cs.is_satisfied().unwrap());
         tracing::info!(target: LOG_TARGET, "Circuit satisfied constraints successfully");
         
-        // TODO: Fix field_to_bytes to properly invert bytes_to_field
-        // assert_eq!(circuit_output, expected_field);
+        // Compare circuit_output with native_output
+        assert_eq!(circuit_output, native_output, "Circuit output should match native computation");
     }
 
     #[test]
@@ -304,8 +267,11 @@ mod tests {
         
         // Start with a simple known input
         let input_bytes = vec![0u8; 32];
-        let input_field = conversions::bytes_to_field::<Fr>(&input_bytes);
-        let input_var = FpVar::<Fr>::new_witness(cs.clone(), || Ok(input_field)).unwrap();
+        let input_var = Sha256Var::<Fr>::new_variable(
+            cs.clone(),
+            || Ok(input_bytes),
+            ark_r1cs_std::alloc::AllocationMode::Witness,
+        ).unwrap();
         
         // Run circuit
         let circuit_result = circuit.generate_constraints(cs.clone(), &input_var).unwrap();
