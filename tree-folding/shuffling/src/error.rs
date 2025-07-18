@@ -20,4 +20,7 @@ pub enum ShuffleError {
     
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+    
+    #[error("Setup failed")]
+    SetupFailed,
 }

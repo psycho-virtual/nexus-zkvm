@@ -2,15 +2,10 @@ use crate::{data_structures::*, poseidon_config::poseidon_config};
 use ark_crypto_primitives::sponge::{
     constraints::CryptographicSpongeVar, poseidon::constraints::PoseidonSpongeVar, Absorb,
 };
-use ark_ec::{
-    short_weierstrass::{Projective, SWCurveConfig},
-    CurveGroup, Group,
-};
+use ark_ec::short_weierstrass::{Projective, SWCurveConfig};
 use ark_ff::PrimeField;
 use ark_r1cs_std::{
-    fields::fp::FpVar,
-    groups::{curves::short_weierstrass::ProjectiveVar, CurveVar},
-    prelude::*,
+    fields::fp::FpVar, groups::curves::short_weierstrass::ProjectiveVar, prelude::*,
     ToConstraintFieldGadget,
 };
 use ark_relations::{
@@ -20,26 +15,23 @@ use ark_relations::{
 use std::marker::PhantomData;
 
 /// Circuit for verifying card shuffling
-pub struct ShuffleCircuit<G1, G2>
+pub struct ShuffleCircuit<G: SWCurveConfig>
 where
-    G1: SWCurveConfig,
-    G2: SWCurveConfig,
+    G::BaseField: PrimeField,
 {
     /// Public key of the shuffler
-    pub shuffler_public_key: Projective<G2>,
-    /// Phantom data for G1
-    _phantom: PhantomData<G1>,
+    pub shuffler_public_key: Projective<G>,
+    /// Phantom data
+    _phantom: PhantomData<G>,
 }
 
-impl<G1, G2> ShuffleCircuit<G1, G2>
+impl<G> ShuffleCircuit<G>
 where
-    G1: SWCurveConfig,
-    G2: SWCurveConfig<BaseField = G1::BaseField, ScalarField = G1::ScalarField>,
-    G1::BaseField: PrimeField + Absorb,
-    G1::ScalarField: PrimeField,
+    G: SWCurveConfig,
+    G::BaseField: PrimeField + Absorb,
 {
     /// Create a new shuffle circuit with the given shuffler public key
-    pub fn new(shuffler_public_key: Projective<G2>) -> Self {
+    pub fn new(shuffler_public_key: Projective<G>) -> Self {
         Self {
             shuffler_public_key,
             _phantom: PhantomData,
@@ -50,9 +42,9 @@ where
     #[tracing::instrument(target = "shuffle::circuit", skip_all)]
     pub fn generate_constraints(
         &self,
-        cs: ConstraintSystemRef<G1::BaseField>,
-        proof: &ShuffleProof<G2>,
-        seed: G1::BaseField,
+        cs: ConstraintSystemRef<G::BaseField>,
+        proof: &ShuffleProof<G>,
+        seed: G::BaseField,
     ) -> Result<(), SynthesisError> {
         tracing::info!(target = "shuffle::circuit", "Starting circuit generation");
 
@@ -60,7 +52,7 @@ where
         let seed_var = FpVar::new_input(cs.clone(), || Ok(seed))?;
         let shuffler_pk_var = {
             let cs = ns!(cs, "shuffler_pk");
-            ProjectiveVar::<G2, FpVar<G2::BaseField>>::new_variable(
+            <ProjectiveVar<G, FpVar<G::BaseField>> as AllocVar<Projective<G>, G::BaseField>>::new_variable(
                 cs,
                 || Ok(&self.shuffler_public_key),
                 AllocationMode::Input,
@@ -70,15 +62,12 @@ where
         // Allocate the shuffle proof as witness
         let proof_var = {
             // let cs = ns!(cs, "shuffle_proof");
-            ShuffleProofVar::<G2>::new_witness(cs.clone(), || Ok(proof))?
+            ShuffleProofVar::<G>::new_witness(cs.clone(), || Ok(proof))?
         };
 
         // Generate random values for each card using Poseidon
-        let input_deck_with_randoms = self.generate_random_values_for_deck(
-            cs.clone(),
-            &seed_var,
-            proof_var.input_deck.clone(),
-        )?;
+        let input_deck_with_randoms =
+            self.generate_random_values_for_deck(cs.clone(), &seed_var, proof_var.input_deck)?;
 
         // Apply re-randomization to create the new deck with associated random values
         let deck_with_rerandomizations = self.apply_rerandomization(
@@ -89,14 +78,14 @@ where
         )?;
 
         // Generate challenges for grand product
-        let alpha = FpVar::new_witness(cs.clone(), || Ok(G1::BaseField::from(7u64)))?; // In practice, from Fiat-Shamir
-        let beta = FpVar::new_witness(cs.clone(), || Ok(G1::BaseField::from(13u64)))?; // In practice, from Fiat-Shamir
+        let alpha = FpVar::new_witness(cs.clone(), || Ok(G::BaseField::from(7u64)))?; // In practice, from Fiat-Shamir
+        let beta = FpVar::new_witness(cs.clone(), || Ok(G::BaseField::from(13u64)))?; // In practice, from Fiat-Shamir
 
         // Verify grand product (multiset equivalence) using the associated lists
         self.verify_equivalance_through_grand_product(
             cs.clone(),
             deck_with_rerandomizations,
-            proof_var.sorted_deck.clone(),
+            proof_var.sorted_deck,
             &alpha,
             &beta,
         )?;
@@ -108,15 +97,15 @@ where
     // #[tracing::instrument(target = "shuffle::circuit::random_gen", skip_all)]
     fn generate_random_values_for_deck(
         &self,
-        cs: ConstraintSystemRef<G1::BaseField>,
-        seed: &FpVar<G1::BaseField>,
-        deck: Vec<ElGamalCiphertextVar<G2>>,
-    ) -> Result<Vec<(ElGamalCiphertextVar<G2>, FpVar<G1::BaseField>)>, SynthesisError>
+        cs: ConstraintSystemRef<G::BaseField>,
+        seed: &FpVar<G::BaseField>,
+        deck: Vec<ElGamalCiphertextVar<G>>,
+    ) -> Result<Vec<(ElGamalCiphertextVar<G>, FpVar<G::BaseField>)>, SynthesisError>
     where
-        G1::BaseField: PrimeField + Absorb,
+        G::BaseField: PrimeField + Absorb,
     {
         // Create Poseidon config
-        let config = poseidon_config::<G1::BaseField>();
+        let config = poseidon_config::<G::BaseField>();
         let mut sponge = PoseidonSpongeVar::new(cs.clone(), &config);
 
         // Absorb seed
@@ -124,9 +113,9 @@ where
 
         // Generate random value for each card
         let mut deck_with_randoms = Vec::with_capacity(deck.len());
-        for card in deck.iter() {
+        for card in deck {
             let random_value = sponge.squeeze_field_elements(1)?[0].clone();
-            deck_with_randoms.push((card.clone(), random_value));
+            deck_with_randoms.push((card, random_value));
         }
 
         Ok(deck_with_randoms)
@@ -135,13 +124,13 @@ where
     #[tracing::instrument(target = "shuffle::rerandomization", skip_all)]
     fn apply_rerandomization(
         &self,
-        cs: ConstraintSystemRef<G1::BaseField>,
-        input_deck: Vec<(ElGamalCiphertextVar<G2>, FpVar<G1::BaseField>)>,
-        rerandomizations: Vec<FpVar<G1::BaseField>>,
-        shuffler_pk: &ProjectiveVar<G2, FpVar<G2::BaseField>>,
-    ) -> Result<Vec<(ElGamalCiphertextVar<G2>, FpVar<G1::BaseField>)>, SynthesisError>
+        cs: ConstraintSystemRef<G::BaseField>,
+        input_deck: Vec<(ElGamalCiphertextVar<G>, FpVar<G::BaseField>)>,
+        rerandomizations: Vec<FpVar<G::BaseField>>,
+        shuffler_pk: &ProjectiveVar<G, FpVar<G::BaseField>>,
+    ) -> Result<Vec<(ElGamalCiphertextVar<G>, FpVar<G::BaseField>)>, SynthesisError>
     where
-        G1::BaseField: PrimeField,
+        G::BaseField: PrimeField,
     {
         let cs = ns!(cs, "apply_rerandomization");
 
@@ -156,11 +145,10 @@ where
         {
             // Apply rerandomization to the ciphertext
             let rerandomized_card = crate::encryption::ElGamalEncryption::<
-                G1,
-                G2,
-                ProjectiveVar<G2, FpVar<G2::BaseField>>,
+                G,
+                ProjectiveVar<G, FpVar<G::BaseField>>,
             >::rerandomize_ciphertext(
-                cs.clone(), card, rerandomization, shuffler_pk
+                cs.cs(), card, rerandomization, shuffler_pk
             )?;
 
             // Keep the same random value associated with the card
@@ -173,16 +161,17 @@ where
     // #[tracing::instrument(target = "shuffle::grand_product", skip_all)]
     fn verify_equivalance_through_grand_product(
         &self,
-        cs: ConstraintSystemRef<G1::BaseField>,
-        rerandomized_deck: Vec<(ElGamalCiphertextVar<G2>, FpVar<G1::BaseField>)>,
-        sorted_deck: Vec<(ElGamalCiphertextVar<G2>, FpVar<G1::BaseField>)>,
-        alpha: &FpVar<G1::BaseField>,
-        beta: &FpVar<G1::BaseField>,
+        cs: ConstraintSystemRef<G::BaseField>,
+        rerandomized_deck: Vec<(ElGamalCiphertextVar<G>, FpVar<G::BaseField>)>,
+        sorted_deck: Vec<(ElGamalCiphertextVar<G>, FpVar<G::BaseField>)>,
+        alpha: &FpVar<G::BaseField>,
+        beta: &FpVar<G::BaseField>,
     ) -> Result<(), SynthesisError>
     where
-        G1::ScalarField: PrimeField + Absorb,
+        G::BaseField: PrimeField + Absorb,
     {
-        let cs = ns!(cs, "grand_product");
+        let ns = ns!(cs, "grand_product");
+        let cs = ns.cs();
 
         // Verify that rerandomized_deck and sorted_deck contain the same multiset
         // using the grand product argument with challenges alpha and beta
@@ -221,11 +210,11 @@ where
     /// Hash a card to a field element for use in grand product
     fn hash_card_to_field(
         &self,
-        cs: ConstraintSystemRef<G1::BaseField>,
-        card: &ElGamalCiphertextVar<G2>,
-    ) -> Result<FpVar<G1::ScalarField>, SynthesisError>
+        cs: ConstraintSystemRef<G::BaseField>,
+        card: &ElGamalCiphertextVar<G>,
+    ) -> Result<FpVar<G::BaseField>, SynthesisError>
     where
-        G1::ScalarField: PrimeField + Absorb,
+        G::BaseField: PrimeField + Absorb,
     {
         let _cs = ns!(cs, "hash_cards");
 
@@ -235,11 +224,26 @@ where
         let c2_fields = card.c2.to_constraint_field()?;
 
         // Sum all field elements from both curve points
-        let mut hash = FpVar::<<G1 as Group>::ScalarField>::zero();
+        let mut hash = FpVar::<G::BaseField>::zero();
         for field_elem in c1_fields.iter().chain(c2_fields.iter()) {
             hash += field_elem;
         }
 
         Ok(hash)
     }
+}
+
+/// Generate the circuit for verifying a shuffle proof
+pub fn generate_circuit<G>(
+    cs: ConstraintSystemRef<G::BaseField>,
+    shuffler_public_key: Projective<G>,
+    proof: &ShuffleProof<G>,
+    seed: G::BaseField,
+) -> Result<(), SynthesisError>
+where
+    G: SWCurveConfig,
+    G::BaseField: PrimeField + Absorb,
+{
+    let circuit = ShuffleCircuit::new(shuffler_public_key);
+    circuit.generate_constraints(cs, proof, seed)
 }

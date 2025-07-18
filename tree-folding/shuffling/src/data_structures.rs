@@ -1,13 +1,14 @@
-use ark_ec::short_weierstrass::{Projective, SWCurveConfig};
-use ark_ec::CurveGroup;
+use ark_ec::{
+    short_weierstrass::{Projective, SWCurveConfig},
+    Group,
+};
 use ark_ff::PrimeField;
 use ark_r1cs_std::groups::curves::short_weierstrass::ProjectiveVar;
-use ark_r1cs_std::{fields::fp::FpVar, groups::CurveVar, prelude::*};
+use ark_r1cs_std::{fields::fp::FpVar, prelude::*};
 use ark_relations::r1cs::SynthesisError;
 use ark_relations::{ns, r1cs};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use serde::{Deserialize, Serialize};
-use std::marker::PhantomData;
 use std::time::Duration;
 
 pub const DECK_SIZE: usize = 52;
@@ -23,15 +24,18 @@ impl<G: SWCurveConfig> ElGamalCiphertext<G> {
         Self { c1, c2 }
     }
 
-    pub fn add_encryption_layer(
-        &self,
-        randomness: G::ScalarField,
-        public_key: Projective<G>,
-    ) -> Self {
-        let generator = CurveGroup::<G>::generator();
+    pub fn add_encryption_layer(&self, randomness: G::BaseField, public_key: Projective<G>) -> Self
+    where
+        G::BaseField: PrimeField,
+        G::ScalarField: PrimeField,
+    {
+        let generator = <Projective<G> as Group>::generator();
+        // Convert BaseField to ScalarField via BigInt
+        let randomness_bigint = randomness.into_bigint();
+
         Self {
-            c1: self.c1 + generator * randomness,
-            c2: self.c2 + public_key * randomness,
+            c1: self.c1 + generator.mul_bigint(randomness_bigint),
+            c2: self.c2 + public_key.mul_bigint(randomness_bigint),
         }
     }
 }
@@ -52,39 +56,43 @@ impl<G: SWCurveConfig> EncryptedDeck<G> {
 
 #[derive(Clone, Debug)]
 pub struct ElGamalKeys<G: SWCurveConfig> {
-    pub private_key: G::ScalarField,
+    pub private_key: G::BaseField,
     pub public_key: Projective<G>,
 }
 
 impl<G: SWCurveConfig> ElGamalKeys<G> {
-    pub fn new(private_key: G::ScalarField) -> Self {
-        let generator = CurveGroup::<G>::generator();
-        let public_key = generator * private_key;
+    pub fn new(private_key: G::BaseField) -> Self
+    where
+        G::BaseField: PrimeField,
+        G::ScalarField: PrimeField,
+    {
+        let generator = <Projective<G> as Group>::generator();
+        // Convert BaseField to ScalarField via BigInt
+        let private_key_bigint = private_key.into_bigint();
+        let public_key = generator.mul_bigint(private_key_bigint);
         Self { private_key, public_key }
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct ShuffleProof<G2: SWCurveConfig>
+pub struct ShuffleProof<G: SWCurveConfig>
 where
-    G2::BaseField: PrimeField,
-    G2::ScalarField: PrimeField,
+    G::BaseField: PrimeField,
 {
-    pub input_deck: EncryptedDeck<G2>,
+    pub input_deck: EncryptedDeck<G>,
     /// Sorted list of (encrypted card, random value) pairs, sorted by random value in ascending order
-    pub sorted_deck: Vec<(ElGamalCiphertext<G2>, G2::ScalarField)>, // The second tuple represents the base field of the primary curve
-    pub rerandomization_values: Vec<G2::ScalarField>, //  The field is the base field of the primary curve
+    pub sorted_deck: Vec<(ElGamalCiphertext<G>, G::BaseField)>,
+    pub rerandomization_values: Vec<G::BaseField>,
 }
 
-impl<G2: SWCurveConfig> ShuffleProof<G2>
+impl<G: SWCurveConfig> ShuffleProof<G>
 where
-    G2::BaseField: PrimeField,
-    G2::ScalarField: PrimeField,
+    G::BaseField: PrimeField,
 {
     pub fn new(
-        input_deck: EncryptedDeck<G2>,
-        sorted_deck: Vec<(ElGamalCiphertext<G2>, G2::ScalarField)>,
-        rerandomization_values: Vec<G2::ScalarField>,
+        input_deck: EncryptedDeck<G>,
+        sorted_deck: Vec<(ElGamalCiphertext<G>, G::BaseField)>,
+        rerandomization_values: Vec<G::BaseField>,
     ) -> Result<Self, crate::ShuffleError> {
         if sorted_deck.len() != DECK_SIZE || rerandomization_values.len() != DECK_SIZE {
             return Err(crate::ShuffleError::InvalidDeckSize(sorted_deck.len()));
@@ -135,7 +143,7 @@ where
 
         let c1 = {
             let cs_c1 = ns!(cs.clone(), "c1");
-            ProjectiveVar::<G, FpVar<G::BaseField>>::new_variable(
+            <ProjectiveVar<G, FpVar<G::BaseField>> as AllocVar<Projective<G>, G::BaseField>>::new_variable(
                 cs_c1,
                 || Ok(ciphertext.c1),
                 mode,
@@ -143,7 +151,7 @@ where
         };
         let c2 = {
             let cs_c2 = ns!(cs.clone(), "c2");
-            ProjectiveVar::<G, FpVar<G::BaseField>>::new_variable(
+            <ProjectiveVar<G, FpVar<G::BaseField>> as AllocVar<Projective<G>, G::BaseField>>::new_variable(
                 cs_c2,
                 || Ok(ciphertext.c2),
                 mode,
@@ -161,17 +169,16 @@ where
 {
     pub input_deck: Vec<ElGamalCiphertextVar<G>>,
     /// Sorted list of (encrypted card, random value) pairs, sorted by random value in ascending order
-    pub sorted_deck: Vec<(ElGamalCiphertextVar<G>, FpVar<G::ScalarField>)>,
-    pub rerandomization_values: Vec<FpVar<G::ScalarField>>,
+    pub sorted_deck: Vec<(ElGamalCiphertextVar<G>, FpVar<G::BaseField>)>,
+    pub rerandomization_values: Vec<FpVar<G::BaseField>>,
 }
 
-impl<G: SWCurveConfig> AllocVar<ShuffleProof<G>, G::ScalarField> for ShuffleProofVar<G>
+impl<G: SWCurveConfig> AllocVar<ShuffleProof<G>, G::BaseField> for ShuffleProofVar<G>
 where
     G::BaseField: PrimeField,
-    G::ScalarField: PrimeField,
 {
     fn new_variable<T: std::borrow::Borrow<ShuffleProof<G>>>(
-        cs: impl Into<r1cs::Namespace<G::ScalarField>>,
+        cs: impl Into<r1cs::Namespace<G::BaseField>>,
         f: impl FnOnce() -> Result<T, SynthesisError>,
         mode: AllocationMode,
     ) -> Result<Self, SynthesisError> {
@@ -197,7 +204,7 @@ where
                 let card_var =
                     { ElGamalCiphertextVar::<G>::new_variable(cs.clone(), || Ok(card), mode)? };
                 let random_var =
-                    { FpVar::<G::ScalarField>::new_variable(cs, || Ok(*random_val), mode)? };
+                    { FpVar::<G::BaseField>::new_variable(cs.clone(), || Ok(*random_val), mode)? };
                 Ok((card_var, random_var))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -206,11 +213,8 @@ where
         let rerandomization_values = proof
             .rerandomization_values
             .iter()
-            .map(|val| {
-                let cs = ark_relations::ns!(cs, "rerandomization");
-                // Convert C1::BaseField to C2::BaseField (they are the same field)
-                FpVar::<C2::BaseField>::new_variable(cs, || Ok(*val), mode)
-            })
+            .enumerate()
+            .map(|(_i, val)| FpVar::<G::BaseField>::new_variable(cs.clone(), || Ok(*val), mode))
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(Self {
