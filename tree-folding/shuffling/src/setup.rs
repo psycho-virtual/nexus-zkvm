@@ -1,14 +1,14 @@
 use crate::{
-    circuit::generate_circuit, data_structures::*, error::ShuffleError, prove::prove_as_subprotocol,
+    circuit::ShuffleCircuit, data_structures::*, error::ShuffleError, prove::prove_as_subprotocol,
 };
 use ark_crypto_primitives::sponge::Absorb;
 use ark_ec::{
     short_weierstrass::{Projective, SWCurveConfig},
-    Group,
+    CurveGroup,
 };
 use ark_ff::PrimeField;
 use ark_groth16::{Groth16, ProvingKey, VerifyingKey};
-use ark_relations::r1cs::{ConstraintMatrices, ConstraintSystem, ConstraintSystemRef};
+use ark_relations::r1cs::{ConstraintMatrices, ConstraintSynthesizer, ConstraintSystem};
 use ark_serialize::CanonicalSerialize;
 use ark_snark::SNARK;
 use ark_std::rand::SeedableRng;
@@ -24,30 +24,28 @@ pub enum ProofSystem {
     Both,
 }
 
-pub struct ShuffleSetup<E: ark_ec::pairing::Pairing, G: SWCurveConfig> {
+pub struct ShuffleSetup<E: ark_ec::pairing::Pairing, G2: SWCurveConfig> {
     pub groth16_pk: Option<ProvingKey<E>>,
     pub groth16_vk: Option<VerifyingKey<E>>,
     pub spartan_gens: Option<Vec<u8>>, // Serialized SNARKGens
     pub spartan_comm: Option<Vec<u8>>, // Serialized commitment
     pub constraint_count: usize,
     pub public_input_count: usize,
-    _phantom: PhantomData<G>,
+    _phantom: PhantomData<G2>,
 }
 
 /// Main proof function with setup
-#[tracing::instrument(target = LOG_TARGET, skip(input_deck, shuffler_keys, setup))]
-pub fn prove_with_setup<E, G>(
-    seed: E::ScalarField,
-    input_deck: EncryptedDeck<G>,
-    shuffler_keys: &ElGamalKeys<G>,
-    setup: &ShuffleSetup<E, G>,
+pub fn prove_with_setup<E, G2>(
+    seed: G2::BaseField,
+    input_deck: EncryptedDeck<Projective<G2>>,
+    shuffler_keys: &ElGamalKeys<Projective<G2>>,
+    setup: &ShuffleSetup<E, G2>,
     proof_system: ProofSystem,
 ) -> Result<(Vec<u8>, ProofMetrics), ShuffleError>
 where
-    G: SWCurveConfig<BaseField = E::ScalarField>,
-    E: ark_ec::pairing::Pairing,
-    E::ScalarField: PrimeField + Absorb,
-    G::BaseField: PrimeField,
+    G2: SWCurveConfig,
+    E: ark_ec::pairing::Pairing<ScalarField = G2::BaseField>,
+    G2::BaseField: PrimeField + Absorb,
 {
     let mut metrics = ProofMetrics::default();
     let _total_span = tracing::info_span!(target: LOG_TARGET, "prove_total").entered();
@@ -56,23 +54,24 @@ where
     let shuffle_proof = {
         let _span = tracing::info_span!(target: LOG_TARGET, "witness_synthesis").entered();
         let start = std::time::Instant::now();
-        let result = prove_as_subprotocol::<G>(seed, input_deck, shuffler_keys)?;
+        let result = prove_as_subprotocol::<Projective<G2>>(seed, input_deck, shuffler_keys)?;
         metrics.witness_synthesis_time = start.elapsed();
         result
     };
 
     // 2. Create constraint system with witnesses
-    let cs = {
+    let _cs = {
         let _span = tracing::info_span!(target: LOG_TARGET, "constraint_generation").entered();
         let start = std::time::Instant::now();
 
-        let cs = ConstraintSystem::<E::ScalarField>::new_ref();
+        let cs = ConstraintSystem::<G2::BaseField>::new_ref();
 
-        // Generate public inputs
-        cs.new_input_variable(|| Ok(seed))
+        // Create and run the circuit
+        let circuit =
+            ShuffleCircuit::<G2>::new(shuffler_keys.public_key, shuffle_proof.clone(), seed);
+        circuit
+            .generate_constraints(cs.clone())
             .map_err(|e| ShuffleError::Synthesis(e))?;
-
-        generate_circuit::<G>(cs.clone(), shuffler_keys.public_key, &shuffle_proof, seed)?;
 
         // Verify constraint count matches setup if provided
         if setup.constraint_count > 0 {
@@ -86,6 +85,14 @@ where
         metrics.constraint_generation_time = start.elapsed();
         metrics.constraint_count = cs.num_constraints();
         metrics.witness_count = cs.num_witness_variables();
+
+        tracing::info!(
+            target = LOG_TARGET,
+            "Witness synthesis complete: {} constraints, {} witnesses in {:?}",
+            metrics.constraint_count,
+            metrics.witness_count,
+            metrics.constraint_generation_time
+        );
 
         cs
     };
@@ -103,12 +110,8 @@ where
                     .ok_or(ShuffleError::SetupNotFound)?;
 
                 // Create the proving circuit
-                let circuit = ShuffleCircuit::<E, G> {
-                    shuffle_proof,
-                    shuffler_public_key: shuffler_keys.public_key,
-                    seed,
-                    _phantom: std::marker::PhantomData,
-                };
+                let circuit =
+                    ShuffleCircuit::<G2>::new(shuffler_keys.public_key, shuffle_proof, seed);
 
                 let proof = Groth16::<E>::prove(
                     pk,
@@ -145,7 +148,7 @@ where
     };
 
     // Calculate total time
-    let total_start = std::time::Instant::now();
+    let _total_start = std::time::Instant::now();
     metrics.total_time = metrics.constraint_generation_time
         + metrics.witness_synthesis_time
         + metrics.proof_generation_time;
@@ -154,13 +157,11 @@ where
 }
 
 /// Setup function - generates proving/verifying keys
-#[tracing::instrument(target = LOG_TARGET, skip_all)]
-pub fn setup<E, G>(proof_system: ProofSystem) -> Result<ShuffleSetup<E, G>, ShuffleError>
+pub fn setup<E, G2>(proof_system: ProofSystem) -> Result<ShuffleSetup<E, G2>, ShuffleError>
 where
-    G: SWCurveConfig<BaseField = E::ScalarField>,
-    E: ark_ec::pairing::Pairing,
-    E::ScalarField: PrimeField + Absorb,
-    G::BaseField: PrimeField,
+    G2: SWCurveConfig,
+    E: ark_ec::pairing::Pairing<ScalarField = G2::BaseField>,
+    G2::BaseField: PrimeField + Absorb,
 {
     let _setup_span = tracing::info_span!(target: LOG_TARGET, "setup_total").entered();
     tracing::info!(target: LOG_TARGET, "Starting setup phase");
@@ -169,25 +170,21 @@ where
     let (constraint_count, public_input_count, sample_proof, sample_keys, sample_seed) = {
         let _span = tracing::info_span!(target: LOG_TARGET, "circuit_analysis").entered();
 
-        let cs = ConstraintSystem::<E::ScalarField>::new_ref();
+        let cs = ConstraintSystem::<G2::BaseField>::new_ref();
 
         // Create a sample proof to determine circuit structure
-        let sample_deck = generate_sample_deck::<G>();
-        let sample_keys = ElGamalKeys::new(E::ScalarField::from(1u64));
-        let sample_seed = E::ScalarField::from(42u64);
-        let sample_proof = prove_as_subprotocol::<G>(sample_seed, sample_deck, &sample_keys)?;
-
-        // Add public input
-        cs.new_input_variable(|| Ok(sample_seed))
-            .map_err(|e| ShuffleError::Synthesis(e))?;
+        let sample_deck = generate_sample_deck::<Projective<G2>>();
+        let sample_keys = ElGamalKeys::new(G2::ScalarField::from(1u64));
+        let sample_seed = G2::BaseField::from(42u64);
+        let sample_proof =
+            prove_as_subprotocol::<Projective<G2>>(sample_seed, sample_deck, &sample_keys)?;
 
         // Generate the circuit to count constraints
-        generate_circuit::<G>(
-            cs.clone(),
-            sample_keys.public_key,
-            &sample_proof,
-            sample_seed,
-        )?;
+        let circuit =
+            ShuffleCircuit::<G2>::new(sample_keys.public_key, sample_proof.clone(), sample_seed);
+        circuit
+            .generate_constraints(cs.clone())
+            .map_err(|e| ShuffleError::Synthesis(e))?;
 
         let constraint_count = cs.num_constraints();
         let public_input_count = cs.num_instance_variables();
@@ -215,12 +212,8 @@ where
             tracing::info!(target: LOG_TARGET, "Generating Groth16 setup");
 
             // Use the sample circuit for setup
-            let circuit = ShuffleCircuit::<E, G> {
-                shuffle_proof: sample_proof,
-                shuffler_public_key: sample_keys.public_key,
-                seed: sample_seed,
-                _phantom: std::marker::PhantomData,
-            };
+            let circuit =
+                ShuffleCircuit::<G2>::new(sample_keys.public_key, sample_proof, sample_seed);
 
             let (pk, vk) = Groth16::<E>::circuit_specific_setup(
                 circuit,
@@ -266,6 +259,7 @@ where
 }
 
 /// Convert arkworks R1CS format to Spartan format
+#[allow(dead_code)]
 fn convert_to_spartan_format<F>(
     _matrices: &ConstraintMatrices<F>,
     _witness: &[F],
@@ -279,67 +273,30 @@ where
     Ok((Vec::new(), Vec::new(), Vec::new()))
 }
 
-/// The actual shuffle circuit for pairing-based system
-/// This uses the pairing's G1 and G2 groups
-struct ShuffleCircuit<E: ark_ec::pairing::Pairing, G: SWCurveConfig>
-where
-    G: SWCurveConfig<BaseField = E::ScalarField>,
-    E: ark_ec::pairing::Pairing,
-    E::ScalarField: PrimeField + Absorb,
-    G::BaseField: PrimeField,
-{
-    shuffle_proof: ShuffleProof<G>,
-    shuffler_public_key: Projective<G>,
-    seed: G::BaseField,
-    _phantom: std::marker::PhantomData<(E, G)>,
-}
-
-impl<E, G> ark_relations::r1cs::ConstraintSynthesizer<E::ScalarField> for ShuffleCircuit<E, G>
-where
-    G: SWCurveConfig<BaseField = E::ScalarField>,
-    E: ark_ec::pairing::Pairing,
-    E::ScalarField: PrimeField + Absorb,
-    G::BaseField: PrimeField,
-{
-    fn generate_constraints(
-        self,
-        cs: ConstraintSystemRef<E::ScalarField>,
-    ) -> Result<(), ark_relations::r1cs::SynthesisError> {
-        // Add seed as public input
-        let _seed_var = cs.new_input_variable(|| Ok(self.seed))?;
-
-        // Generate the circuit constraints
-        generate_circuit::<G>(cs, self.shuffler_public_key, &self.shuffle_proof, self.seed)
-    }
-}
-
 /// Convenience function without setup (for testing/single use)
-pub fn prove<E, G>(
-    seed: E::ScalarField,
-    input_deck: EncryptedDeck<G>,
-    shuffler_keys: &ElGamalKeys<G>,
+pub fn prove<E, G2>(
+    seed: G2::BaseField,
+    input_deck: EncryptedDeck<Projective<G2>>,
+    shuffler_keys: &ElGamalKeys<Projective<G2>>,
     proof_system: ProofSystem,
 ) -> Result<(Vec<u8>, ProofMetrics), ShuffleError>
 where
-    G: SWCurveConfig<BaseField = E::ScalarField>,
-    E: ark_ec::pairing::Pairing,
-    E::ScalarField: PrimeField + Absorb,
-    G::BaseField: PrimeField,
+    G2: SWCurveConfig,
+    E: ark_ec::pairing::Pairing<ScalarField = G2::BaseField>,
+    G2::BaseField: PrimeField + Absorb,
 {
-    let setup = setup::<E, G>(proof_system.clone())?;
-    prove_with_setup::<E, G>(seed, input_deck, shuffler_keys, &setup, proof_system)
+    let setup = setup::<E, G2>(proof_system.clone())?;
+    prove_with_setup::<E, G2>(seed, input_deck, shuffler_keys, &setup, proof_system)
 }
 
-fn generate_sample_deck<G: SWCurveConfig>() -> EncryptedDeck<G>
+fn generate_sample_deck<C: CurveGroup>() -> EncryptedDeck<C>
 where
-    G::BaseField: PrimeField,
-    G::ScalarField: PrimeField,
+    C::ScalarField: PrimeField,
 {
-    let generator = <Projective<G> as Group>::generator();
-    let dummy_cards: Vec<ElGamalCiphertext<G>> = (0..DECK_SIZE)
+    let generator = C::generator();
+    let dummy_cards: Vec<ElGamalCiphertext<C>> = (0..DECK_SIZE)
         .map(|i| {
-            let scalar = G::BaseField::from((i + 1) as u64);
-            // Convert BaseField to ScalarField via BigInt
+            let scalar = C::ScalarField::from((i + 1) as u64);
             let scalar_bigint = scalar.into_bigint();
             ElGamalCiphertext {
                 c1: generator.mul_bigint(scalar_bigint),
@@ -349,4 +306,108 @@ where
         .collect();
 
     EncryptedDeck::new(dummy_cards).unwrap()
+}
+
+// Test
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ark_bn254::Bn254;
+    use ark_ec::{CurveConfig, PrimeGroup};
+    use ark_ff::UniformRand;
+    use ark_groth16::Groth16;
+    use ark_grumpkin::{GrumpkinConfig, Projective as GrumpkinProjective};
+    use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef};
+    use ark_snark::SNARK;
+    use std::sync::Once;
+
+    const TEST_TARGET: &str = "shuffle";
+    static INIT: Once = Once::new();
+
+    fn init_tracing() {
+        INIT.call_once(|| {
+            tracing_subscriber::fmt()
+                .with_target(true)
+                .with_level(true)
+                .with_line_number(true)
+                .with_file(true)
+                .with_timer(tracing_subscriber::fmt::time::uptime())
+                .with_max_level(tracing::Level::DEBUG)
+                .init();
+        });
+    }
+
+    #[test]
+    fn test_generate_sample_deck() -> Result<(), Box<dyn std::error::Error>> {
+        init_tracing();
+        // Use GrumpkinProjective as the curve
+        let input_deck = generate_sample_deck::<GrumpkinProjective>();
+        assert_eq!(input_deck.cards.len(), DECK_SIZE);
+
+        // GrumpkinProjective has:
+        // - BaseField = BN254's Fr (since Grumpkin's Fq = BN254's Fr)
+        // - ScalarField = BN254's Fq (since Grumpkin's Fr = BN254's Fq)
+
+        // For the seed, we need Grumpkin's base field (which is BN254's Fr)
+        let seed = <GrumpkinProjective as CurveGroup>::BaseField::rand(&mut rand::thread_rng());
+
+        // For ElGamal keys, we need Grumpkin's scalar field (which is BN254's Fq)
+        let private_key =
+            <GrumpkinConfig as CurveConfig>::ScalarField::rand(&mut rand::thread_rng());
+        let public_key: GrumpkinProjective = GrumpkinProjective::generator() * private_key;
+        let shuffler_keys = ElGamalKeys { private_key, public_key };
+
+        // Making a proof
+        let proof = prove_as_subprotocol::<GrumpkinProjective>(seed, input_deck, &shuffler_keys)?;
+
+        // Create the circuit - GrumpkinConfig implements SWCurveConfig
+        let circuit: ShuffleCircuit<GrumpkinConfig> =
+            ShuffleCircuit::new(shuffler_keys.public_key, proof, seed);
+
+        let mut rng = rand::thread_rng();
+
+        // Guard for measuring constraint system generation time
+        let cs = ConstraintSystemRef::new(ark_relations::r1cs::ConstraintSystem::new());
+        {
+            let _constraint_span =
+                tracing::info_span!(target: TEST_TARGET, "constraint_system_generation").entered();
+
+            tracing::debug!(target: TEST_TARGET, "Trying to generate constraints");
+
+            circuit.clone().generate_constraints(cs.clone())?;
+
+            tracing::info!(
+                target: TEST_TARGET,
+                num_constraints = cs.num_constraints(),
+                num_instance_vars = cs.num_instance_variables(),
+                num_witness_vars = cs.num_witness_variables(),
+                "Constraint system generated"
+            );
+        }
+
+        // Check if the constraint system is satisfied
+        let is_satisfied = cs.is_satisfied()?;
+        tracing::info!(
+            target: TEST_TARGET,
+            satisfied = is_satisfied,
+            "Constraint system satisfaction check"
+        );
+        assert!(is_satisfied, "Constraint system should be satisfied");
+
+        // Setup phase (derive proving and verification keys)
+        let (pk, vk) = Groth16::<Bn254>::circuit_specific_setup(circuit.clone(), &mut rng)?;
+        tracing::info!(target: TEST_TARGET, "Groth16 setup complete");
+
+        // Guard for measuring proof generation time (includes witness synthesis)
+        {
+            let _proof_span =
+                tracing::info_span!(target: TEST_TARGET, "proof_generation").entered();
+
+            let _snark_proof = Groth16::<Bn254>::prove(&pk, circuit, &mut rng)?;
+
+            tracing::info!(target: TEST_TARGET, "SNARK proof generated successfully");
+        }
+
+        Ok(())
+    }
 }

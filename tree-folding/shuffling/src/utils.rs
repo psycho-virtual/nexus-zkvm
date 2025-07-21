@@ -4,7 +4,7 @@ use ark_ff::PrimeField;
 
 const LOG_TARGET: &str = "tree_folding_shuffling::util";
 
-pub fn generate_random_values<F: PrimeField + Absorb>(seed: F, count: usize) -> Vec<F> {
+pub fn generate_random_values<F: Absorb + PrimeField>(seed: F, count: usize) -> Vec<F> {
     let config = poseidon_config::<F>();
     let mut sponge = PoseidonSponge::new(&config);
 

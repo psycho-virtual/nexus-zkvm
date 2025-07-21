@@ -1,35 +1,34 @@
 use crate::{data_structures::*, error::ShuffleError, utils::generate_random_values};
 use ark_crypto_primitives::sponge::Absorb;
-use ark_ec::short_weierstrass::SWCurveConfig;
+use ark_ec::CurveGroup;
 use ark_ff::PrimeField;
 use ark_std::UniformRand;
 
 const LOG_TARGET: &str = "shuffle::subprotocol";
 
 #[tracing::instrument(target = LOG_TARGET, skip(input_deck, shuffler_keys))]
-pub fn prove_as_subprotocol<G: SWCurveConfig>(
-    seed: G::BaseField,
-    input_deck: EncryptedDeck<G>,
-    shuffler_keys: &ElGamalKeys<G>,
-) -> Result<ShuffleProof<G>, ShuffleError>
+pub fn prove_as_subprotocol<C: CurveGroup>(
+    seed: C::BaseField,
+    input_deck: EncryptedDeck<C>,
+    shuffler_keys: &ElGamalKeys<C>,
+) -> Result<ShuffleProof<C>, ShuffleError>
 where
-    G::BaseField: PrimeField + Absorb,
-    G::ScalarField: PrimeField,
+    C::BaseField: Absorb + PrimeField,
 {
     tracing::info!(target = LOG_TARGET, "Starting shuffle proof generation");
 
     // 1. Generate random values for sorting using Poseidon with seed
-    let random_values = generate_random_values::<G::BaseField>(seed, DECK_SIZE);
+    let random_values = generate_random_values::<C::BaseField>(seed, DECK_SIZE);
     tracing::debug!(
         target = LOG_TARGET,
         "Generated {} random sorting values",
         DECK_SIZE
     );
 
-    // 2. Generate rerandomization values r'_i (scalars in the base field)
+    // 2. Generate rerandomization values r'_i (scalars in the scalar field)
     let mut rng = ark_std::test_rng(); // In production, use a secure RNG
-    let rerandomization_values: Vec<G::BaseField> = (0..DECK_SIZE)
-        .map(|_| G::BaseField::rand(&mut rng))
+    let rerandomization_values: Vec<C::BaseField> = (0..DECK_SIZE)
+        .map(|_| C::BaseField::rand(&mut rng))
         .collect();
     tracing::debug!(
         target = LOG_TARGET,
@@ -37,19 +36,19 @@ where
         DECK_SIZE
     );
 
-    // 3. Add encryption layer to each card (operations on G):
+    // 3. Add encryption layer to each card (operations on C):
     //    - New c1 = c1 + r'_i * G
     //    - New c2 = c2 + r'_i * Y (where Y is shuffler's public key)
-    let rerandomized_cards: Vec<ElGamalCiphertext<G>> = input_deck
+    let rerandomized_cards: Vec<ElGamalCiphertext<C>> = input_deck
         .cards
         .iter()
         .zip(&rerandomization_values)
-        .map(|(card, &rerand)| card.add_encryption_layer(rerand, shuffler_keys.public_key))
+        .map(|(card, &rerand)| card.add_encryption_layer(rerand, shuffler_keys.public_key)) // TODO: maybe we can remove the need of using the other field
         .collect();
     tracing::debug!(target = LOG_TARGET, "Re-randomized all cards");
 
     // 4. Create associated list: [(re_randomized_card_i, random_value_i)]
-    let associated_list: Vec<(ElGamalCiphertext<G>, G::BaseField)> =
+    let associated_list: Vec<(ElGamalCiphertext<C>, C::BaseField)> =
         rerandomized_cards.into_iter().zip(random_values).collect();
 
     // 5. Sort by random values to get the sorted deck

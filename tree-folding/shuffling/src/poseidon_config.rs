@@ -9,6 +9,14 @@ pub fn poseidon_config<F: PrimeField>() -> PoseidonConfig<F> {
     const RATE: usize = 2;
     const CAPACITY: usize = 1;
 
+    let _span = tracing::info_span!(
+        target: "shuffle::poseidon", 
+        "poseidon_param_generation",
+        field_bits = F::MODULUS_BIT_SIZE
+    ).entered();
+    
+    tracing::info!(target: "shuffle::poseidon", "Starting Poseidon parameter generation");
+    
     let (ark, mds) = find_poseidon_ark_and_mds::<F>(
         F::MODULUS_BIT_SIZE as u64,
         RATE,
@@ -16,6 +24,8 @@ pub fn poseidon_config<F: PrimeField>() -> PoseidonConfig<F> {
         PARTIAL_ROUNDS as u64,
         0,
     );
+    
+    tracing::info!(target: "shuffle::poseidon", "Poseidon parameter generation completed");
 
     PoseidonConfig {
         full_rounds: FULL_ROUNDS,

@@ -1,12 +1,17 @@
 use crate::data_structures::*;
 use ark_ec::{
     short_weierstrass::{Projective, SWCurveConfig},
-    Group,
+    CurveConfig, PrimeGroup,
 };
 use ark_ff::PrimeField;
 use ark_r1cs_std::{
+    convert::ToBitsGadget,
+    eq::EqGadget,
     fields::fp::FpVar,
-    groups::{curves::short_weierstrass::ProjectiveVar, CurveVar},
+    groups::{
+        curves::short_weierstrass::ProjectiveVar,
+        CurveVar,
+    },
     prelude::*,
 };
 use ark_relations::{
@@ -18,11 +23,11 @@ use std::marker::PhantomData;
 const LOG_TARGET: &str = "shuffle::encryption";
 
 /// ElGamal encryption operations
-pub struct ElGamalEncryption<G, CV> {
-    _phantom: PhantomData<(G, CV)>,
+pub struct ElGamalEncryption<G: CurveConfig> {
+    _phantom: PhantomData<G>,
 }
 
-impl<G> ElGamalEncryption<G, ProjectiveVar<G, FpVar<G::BaseField>>>
+impl<G: CurveConfig> ElGamalEncryption<G>
 where
     G: SWCurveConfig,
     G::BaseField: PrimeField,
@@ -46,21 +51,22 @@ where
         let cs = ns!(cs, "encrypt_card");
 
         // Fixed-base multiplication: R = r * g
-        let generator = <ProjectiveVar<G, FpVar<G::BaseField>> as AllocVar<
-            Projective<G>,
-            G::BaseField,
-        >>::new_constant(cs.clone(), <Projective<G> as Group>::generator())?;
+        let generator = ProjectiveVar::<G, FpVar<G::BaseField>>::new_constant(
+            cs.clone(),
+            Projective::<G>::generator(),
+        )?;
+
         let r_bits = r.to_bits_le()?;
         let r_point = generator.scalar_mul_le(r_bits.iter())?;
 
         // c1 = m0 + R
-        let c1 = m0.clone() + r_point;
+        let c1 = m0 + &r_point;
 
         // Variable-base multiplication: P = r * pk
         let p_point = pk.scalar_mul_le(r_bits.iter())?;
 
         // c2 = m1 + P
-        let c2 = m1.clone() + p_point;
+        let c2 = m1 + &p_point;
 
         Ok((c1, c2))
     }
@@ -79,7 +85,7 @@ where
         let s_point = c1.scalar_mul_le(s_bits.iter())?;
 
         // c2' = c2 - S
-        let c2_prime = c2.clone() - s_point;
+        let c2_prime = c2 - &s_point;
 
         Ok(c2_prime)
     }
@@ -96,10 +102,10 @@ where
         let cs = ns!(cs, "rerandomize");
 
         // Fixed-base multiplication: r' * g
-        let generator = <ProjectiveVar<G, FpVar<G::BaseField>> as AllocVar<
-            Projective<G>,
-            G::BaseField,
-        >>::new_constant(cs.clone(), <Projective<G> as Group>::generator())?;
+        let generator = ProjectiveVar::<G, FpVar<G::BaseField>>::new_constant(
+            cs.clone(),
+            Projective::<G>::generator(),
+        )?;
         let r_bits = rerandomization.to_bits_le()?;
         let r_g = generator.scalar_mul_le(r_bits.iter())?;
 
@@ -107,10 +113,10 @@ where
         let r_pk = shuffler_pk.scalar_mul_le(r_bits.iter())?;
 
         // c1' = c1 + r' * g
-        let c1_prime = ciphertext.c1.clone() + r_g;
+        let c1_prime = &ciphertext.c1 + &r_g;
 
         // c2' = c2 + r' * pk_shuffler
-        let c2_prime = ciphertext.c2.clone() + r_pk;
+        let c2_prime = &ciphertext.c2 + &r_pk;
 
         Ok(ElGamalCiphertextVar::new(c1_prime, c2_prime))
     }
