@@ -1,4 +1,4 @@
-use crate::poseidon_config::poseidon_config;
+use nexus_nova::poseidon_config;
 use ark_crypto_primitives::sponge::{poseidon::PoseidonSponge, Absorb, CryptographicSponge};
 use ark_ff::PrimeField;
 

@@ -5,7 +5,6 @@ pub mod setup;
 pub mod error;
 pub mod utils;
 pub mod encryption;
-pub mod poseidon_config;
 
 #[cfg(test)]
 mod test_scalar_mul;

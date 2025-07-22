@@ -1,10 +1,9 @@
-use crate::{data_structures::*, poseidon_config::poseidon_config};
+use crate::data_structures::*;
+use nexus_nova::poseidon_config;
 use ark_crypto_primitives::sponge::{
     constraints::CryptographicSpongeVar, poseidon::constraints::PoseidonSpongeVar, Absorb,
 };
-use ark_ec::{
-    short_weierstrass::{Projective, SWCurveConfig},
-};
+use ark_ec::short_weierstrass::{Projective, SWCurveConfig};
 use ark_ff::PrimeField;
 use ark_r1cs_std::convert::ToConstraintFieldGadget;
 use ark_r1cs_std::{
@@ -64,15 +63,31 @@ where
         sponge.absorb(&seed)?;
 
         // Generate random value for each card
-        let mut deck_with_randoms = Vec::with_capacity(deck.len());
-        tracing::debug!(target = LOG_TARGET, "Generating random values for {} cards", deck.len());
-        for (i, card) in deck.into_iter().enumerate() {
-            if i % 10 == 0 {
-                tracing::debug!(target = LOG_TARGET, "Processing card {}/{}", i, deck_with_randoms.capacity());
-            }
-            let random_value = sponge.squeeze_field_elements(1)?[0].clone();
-            deck_with_randoms.push((card, random_value));
-        }
+        let deck_len = deck.len();
+        tracing::debug!(
+            target = LOG_TARGET,
+            "Generating random values for {} cards",
+            deck_len
+        );
+        
+        // Squeeze all random values at once - much more efficient
+        let random_values = sponge.squeeze_field_elements(deck_len)?;
+        
+        // Safety check: ensure we got exactly the right number of random values
+        assert_eq!(
+            random_values.len(), 
+            deck_len, 
+            "Squeeze operation should return exactly {} random values, got {}", 
+            deck_len, 
+            random_values.len()
+        );
+        
+        // Pair each card with its random value
+        let deck_with_randoms = deck
+            .into_iter()
+            .zip(random_values.into_iter())
+            .collect::<Vec<_>>();
+            
         tracing::debug!(target = LOG_TARGET, "All random values generated");
 
         Ok(deck_with_randoms)
@@ -221,13 +236,21 @@ where
             // let cs = ns!(cs, "shuffle_proof");
             ShuffleProofVar::<G>::new_witness(cs.clone(), || Ok(&self.proof))?
         };
-        tracing::info!(target = LOG_TARGET, "Shuffle proof witness allocated. Input deck size: {}", proof_var.input_deck.len());
+        tracing::info!(
+            target = LOG_TARGET,
+            "Shuffle proof witness allocated. Input deck size: {}",
+            proof_var.input_deck.len()
+        );
 
         // Generate random values for each card using Poseidon
         tracing::info!(target = LOG_TARGET, "Generating random values for deck...");
         let input_deck_with_randoms =
             self.generate_random_values_for_deck(cs.clone(), &seed_var, proof_var.input_deck)?;
-        tracing::info!(target = LOG_TARGET, "Random values generated for {} cards", input_deck_with_randoms.len());
+        tracing::info!(
+            target = LOG_TARGET,
+            "Random values generated for {} cards",
+            input_deck_with_randoms.len()
+        );
 
         // Apply re-randomization to create the new deck with associated random values
         tracing::info!(target = LOG_TARGET, "Applying rerandomization...");
@@ -240,13 +263,19 @@ where
         tracing::info!(target = LOG_TARGET, "Rerandomization complete");
 
         // Generate challenges for grand product
-        tracing::info!(target = LOG_TARGET, "Allocating challenges for grand product...");
+        tracing::info!(
+            target = LOG_TARGET,
+            "Allocating challenges for grand product..."
+        );
         let alpha = FpVar::new_witness(cs.clone(), || Ok(G::BaseField::from(7u64)))?; // In practice, from Fiat-Shamir
         let beta = FpVar::new_witness(cs.clone(), || Ok(G::BaseField::from(13u64)))?; // In practice, from Fiat-Shamir
         tracing::info!(target = LOG_TARGET, "Challenges allocated");
 
         // Verify grand product (multiset equivalence) using the associated lists
-        tracing::info!(target = LOG_TARGET, "Starting grand product verification...");
+        tracing::info!(
+            target = LOG_TARGET,
+            "Starting grand product verification..."
+        );
         self.verify_equivalance_through_grand_product(
             cs.clone(),
             deck_with_rerandomizations,
