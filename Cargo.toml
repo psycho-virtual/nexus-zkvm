@@ -15,10 +15,9 @@ members = [
     "spartan",
     "core",
     "jolt",
-    "sdk", 
+    "sdk",
     "macro",
     "macro/profiler",
-    "tree-folding/shuffling",
 ]
 default-members = [
     "vm",
