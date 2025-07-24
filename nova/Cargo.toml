@@ -22,6 +22,17 @@ ark-poly-commit = { workspace = true }
 
 ark_spartan = { path = "../spartan", package = "ark-spartan", default-features = false }
 
+# Dependencies needed for shuffling module
+ark-groth16 = { version = "0.5.0" }
+ark-snark = { version = "0.5.0" }
+thiserror = "1.0"
+serde = { workspace = true }
+ark-pallas = { workspace = true }
+ark-vesta = { workspace = true }
+ark-bn254 = { workspace = true }
+ark-grumpkin = { workspace = true }
+ark-ed-on-bn254 = { version = "0.5.0", features = ["r1cs"] }
+
 merlin = { version = "3.0.0" }
 sha2 = "0.10.8"
 sha3 = { workspace = true }
@@ -53,6 +64,7 @@ tracing-test = "0.2.5"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 derivative = "2.2.0"
 tracing-flame = "0.2.0"
+ark-bls12-381 = "0.5.0"
 
 [features]
 default = ["parallel"]
@@ -78,5 +90,11 @@ ark-grumpkin.workspace = true
 tracing-subscriber = { version = "0.3", default-features = false, features = [
    "fmt",
    "ansi",
+   "env-filter",
 ] }
 zstd = "0.13.0"
+structopt = "0.3"
+
+# Profile should be in workspace root, not here
+[profile.release]
+debug = "full"

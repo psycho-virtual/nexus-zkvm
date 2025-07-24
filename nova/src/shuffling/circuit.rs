@@ -42,7 +42,13 @@ where
         Self { shuffler_public_key, proof, seed }
     }
 
-    // #[tracing::instrument(target = "shuffle::circuit::random_gen", skip_all)]
+    #[tracing::instrument(
+        target = "shuffle::circuit",
+        name = "generate_random_values_for_deck",
+        level = "debug",
+        skip_all,
+        fields(deck_size = tracing::field::Empty)
+    )]
     fn generate_random_values_for_deck(
         &self,
         cs: ConstraintSystemRef<G::BaseField>,
@@ -52,57 +58,59 @@ where
     where
         G::BaseField: PrimeField + Absorb + Copy,
     {
-        // Create Poseidon config
-        tracing::debug!(target = LOG_TARGET, "Creating Poseidon config");
-        let config = poseidon_config::<G::BaseField>();
-        let mut sponge = PoseidonSpongeVar::new(cs.clone(), &config);
+        crate::track_constraints!(&cs, "constructing random values for deck", LOG_TARGET, {
+            // Create Poseidon config
+            tracing::debug!(target = LOG_TARGET, "Creating Poseidon config");
+            let config = poseidon_config::<G::BaseField>();
+            let mut sponge = PoseidonSpongeVar::new(cs.clone(), &config);
 
-        // Absorb seed
-        tracing::debug!(target = LOG_TARGET, "Absorbing seed into sponge");
-        sponge.absorb(&seed)?;
+            // Absorb seed
+            tracing::debug!(target = LOG_TARGET, "Absorbing seed into sponge");
+            sponge.absorb(&seed)?;
 
-        // Generate random value for each card
-        let deck_len = deck.len();
-        tracing::debug!(
-            target = LOG_TARGET,
-            "Generating random values for {} cards",
-            deck_len
-        );
-
-        // Squeeze all random values at once - much more efficient
-        let mut random_values = Vec::with_capacity(DECK_SIZE);
-        for i in 0..DECK_SIZE {
+            // Generate random value for each card
+            let deck_len = deck.len();
             tracing::debug!(
                 target = LOG_TARGET,
-                "Generating random value for card {}",
-                i
+                "Generating random values for {} cards",
+                deck_len
             );
-            let value = sponge.squeeze_field_elements(1)?[0].clone();
-            random_values.push(value);
-        }
 
-        // Safety check: ensure we got exactly the right number of random values
-        assert_eq!(
-            random_values.len(),
-            deck_len,
-            "Squeeze operation should return exactly {} random values, got {}",
-            deck_len,
-            random_values.len()
-        );
+            // Squeeze all random values at once - much more efficient
+            let mut random_values = Vec::with_capacity(DECK_SIZE);
+            for i in 0..DECK_SIZE {
+                tracing::debug!(
+                    target = LOG_TARGET,
+                    "Generating random value for card {}",
+                    i
+                );
+                let value = sponge.squeeze_field_elements(1)?[0].clone();
+                random_values.push(value);
+            }
 
-        // Pair each card with its random value
-        let deck_with_randoms = deck
-            .into_iter()
-            .zip(random_values.into_iter())
-            .collect::<Vec<_>>();
+            // Safety check: ensure we got exactly the right number of random values
+            assert_eq!(
+                random_values.len(),
+                deck_len,
+                "Squeeze operation should return exactly {} random values, got {}",
+                deck_len,
+                random_values.len()
+            );
 
-        tracing::debug!(target = LOG_TARGET, "All random values generated");
+            // Pair each card with its random value
+            let deck_with_randoms = deck
+                .into_iter()
+                .zip(random_values.into_iter())
+                .collect::<Vec<_>>();
 
-        Ok(deck_with_randoms)
+            tracing::debug!(target = LOG_TARGET, "All random values generated");
+
+            Ok(deck_with_randoms)
+        })
     }
 
     #[tracing::instrument(target = LOG_TARGET, skip_all)]
-    fn apply_rerandomization(
+    fn reencrypt_cards_with_new_randomization(
         &self,
         cs: ConstraintSystemRef<G::BaseField>,
         input_deck: Vec<(ElGamalCiphertextVar<G>, FpVar<G::BaseField>)>,
@@ -112,7 +120,7 @@ where
     where
         G::BaseField: PrimeField,
     {
-        let cs = ns!(cs, "apply_rerandomization");
+        let cs = ns!(cs, "reencrypt_cards_with_new_randomization");
 
         if input_deck.len() != rerandomizations.len() {
             return Err(SynthesisError::Unsatisfiable);
@@ -270,8 +278,6 @@ where
             )?
         };
 
-        tracing::info!(target = LOG_TARGET, "Does it stop here? Let me know");
-
         tracing::info!(
             target = LOG_TARGET,
             "Shuffle proof witness allocated. Input deck size: {}",
@@ -280,32 +286,16 @@ where
 
         // Generate random values for each card using Poseidon
         tracing::info!(target = LOG_TARGET, "Generating random values for deck...");
-        let start = std::time::Instant::now();
         let input_deck_with_randoms =
             self.generate_random_values_for_deck(cs.clone(), &seed_var, proof_var.input_deck)?;
-        let duration = start.elapsed();
-        tracing::info!(
-            target = LOG_TARGET,
-            "Random values generated for {} cards in {:?}",
-            input_deck_with_randoms.len(),
-            duration
-        );
 
         // Apply re-randomization to create the new deck with associated random values
-        tracing::info!(target = LOG_TARGET, "Applying rerandomization...");
-        let start = std::time::Instant::now();
-        let deck_with_rerandomizations = self.apply_rerandomization(
+        let deck_with_rerandomizations = self.reencrypt_cards_with_new_randomization(
             cs.clone(),
             input_deck_with_randoms,
             proof_var.rerandomization_values.clone(),
             &shuffler_pk_var,
         )?;
-        let duration = start.elapsed();
-        tracing::info!(
-            target = LOG_TARGET,
-            "Rerandomization complete in {:?}",
-            duration
-        );
 
         // Generate challenges for grand product
         tracing::info!(
@@ -321,7 +311,6 @@ where
             target = LOG_TARGET,
             "Starting grand product verification..."
         );
-        let start = std::time::Instant::now();
         self.verify_equivalance_through_grand_product(
             cs.clone(),
             deck_with_rerandomizations,
@@ -329,13 +318,6 @@ where
             &alpha,
             &beta,
         )?;
-        let duration = start.elapsed();
-        tracing::info!(
-            target = LOG_TARGET,
-            "Grand product verification complete in {:?}",
-            duration
-        );
-
         Ok(())
     }
 }

@@ -167,7 +167,6 @@ impl<F: PrimeField> SHA256ChainBuilder<F> {
                 }
             }
 
-
             let computation = SHA256ChainMangroveComputation::new(
                 request.input,
                 hashes.last().unwrap().clone(),
@@ -241,11 +240,7 @@ mod tests {
     use super::*;
     use ark_bn254::Fr as Bn254Fr;
     use ark_ff::UniformRand;
-    use ark_r1cs_std::{
-        alloc::AllocVar,
-        fields::FieldVar,
-        R1CSVar,
-    };
+    use ark_r1cs_std::{alloc::AllocVar, fields::FieldVar, R1CSVar};
     use ark_std::test_rng;
     use tracing::error;
     use tracing_subscriber::{

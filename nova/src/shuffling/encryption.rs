@@ -8,10 +8,7 @@ use ark_r1cs_std::{
     convert::ToBitsGadget,
     eq::EqGadget,
     fields::fp::FpVar,
-    groups::{
-        curves::short_weierstrass::ProjectiveVar,
-        CurveVar,
-    },
+    groups::{curves::short_weierstrass::ProjectiveVar, CurveVar},
     prelude::*,
 };
 use ark_relations::{
@@ -99,30 +96,33 @@ where
         rerandomization: &FpVar<G::BaseField>,
         shuffler_pk: &ProjectiveVar<G, FpVar<G::BaseField>>,
     ) -> Result<ElGamalCiphertextVar<G>, SynthesisError> {
-        let cs = ns!(cs, "rerandomize");
+        let n = ns!(cs, "rerandomize");
+        let cs = n.cs();
 
-        // Fixed-base multiplication: r' * g
-        let generator = ProjectiveVar::<G, FpVar<G::BaseField>>::new_constant(
-            cs.clone(),
-            Projective::<G>::generator(),
-        )?;
-        let r_bits = rerandomization.to_bits_le()?;
-        let r_g = generator.scalar_mul_le(r_bits.iter())?;
+        crate::track_constraints!(&cs, "rerandomize_ciphertext", LOG_TARGET, {
+            // Fixed-base multiplication: r' * g
+            let generator = ProjectiveVar::<G, FpVar<G::BaseField>>::new_constant(
+                cs.clone(),
+                Projective::<G>::generator(),
+            )?;
+            let r_bits = rerandomization.to_bits_le()?;
+            let r_g = generator.scalar_mul_le(r_bits.iter())?;
 
-        // Variable-base multiplication: r' * pk_shuffler
-        let r_pk = shuffler_pk.scalar_mul_le(r_bits.iter())?;
+            // Variable-base multiplication: r' * pk_shuffler
+            let r_pk = shuffler_pk.scalar_mul_le(r_bits.iter())?;
 
-        // c1' = c1 + r' * g
-        let c1_prime = &ciphertext.c1 + &r_g;
+            // c1' = c1 + r' * g
+            let c1_prime = &ciphertext.c1 + &r_g;
 
-        // c2' = c2 + r' * pk_shuffler
-        let c2_prime = &ciphertext.c2 + &r_pk;
+            // c2' = c2 + r' * pk_shuffler
+            let c2_prime = &ciphertext.c2 + &r_pk;
 
-        Ok(ElGamalCiphertextVar::new(c1_prime, c2_prime))
+            Ok(ElGamalCiphertextVar::new(c1_prime, c2_prime))
+        })
     }
 
     /// Verify that a deck has been correctly re-randomized
-    #[tracing::instrument(target = LOG_TARGET, skip_all)]
+    #[tracing::instrument(target = LOG_TARGET, name = "verify_rerandomization", skip_all)]
     pub fn verify_rerandomization(
         cs: ConstraintSystemRef<G::BaseField>,
         input_deck: Vec<ElGamalCiphertextVar<G>>,

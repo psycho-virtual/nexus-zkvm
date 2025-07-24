@@ -8,6 +8,7 @@ pub mod absorb;
 pub mod provider; // Making this public for our use
 mod sparse;
 mod utils;
+mod tracing_utils;
 
 pub mod circuits;
 pub mod folding; // Making folding module public
@@ -20,6 +21,7 @@ pub mod ccs;
 pub mod commitment;
 pub mod r1cs;
 pub mod tree_folding;
+pub mod shuffling;
 
 // -----------------------------------------------------------------------------
 // Parallel tree execution engine
