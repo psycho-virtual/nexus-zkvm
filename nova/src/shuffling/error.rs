@@ -23,4 +23,7 @@ pub enum ShuffleError {
     
     #[error("Setup failed")]
     SetupFailed,
+    
+    #[error("Unsatisfied constraint: {0}")]
+    UnsatisfiedConstraint(String),
 }

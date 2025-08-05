@@ -1494,7 +1494,7 @@ mod tests {
         );
 
         // Verify the random values match between native and circuit
-        for (i, (native_val, circuit_val)) in native_random_values
+        for (_i, (_native_val, circuit_val)) in native_random_values
             .iter()
             .zip(all_random_values.iter())
             .enumerate()

@@ -4,7 +4,7 @@ use super::{
 use ark_crypto_primitives::sponge::Absorb;
 use ark_ec::{
     short_weierstrass::{Projective, SWCurveConfig},
-    CurveConfig, CurveGroup,
+    CurveGroup,
 };
 use ark_ff::PrimeField;
 use ark_groth16::{Groth16, ProvingKey, VerifyingKey};
@@ -37,7 +37,7 @@ pub struct ShuffleSetup<E: ark_ec::pairing::Pairing, G2: SWCurveConfig> {
 /// Main proof function with setup
 pub fn prove_with_setup<E, G2>(
     seed: G2::BaseField,
-    input_deck: EncryptedDeck<Projective<G2>>,
+    input_deck: Vec<ElGamalCiphertext<Projective<G2>>>,
     shuffler_keys: &ElGamalKeys<Projective<G2>>,
     setup: &ShuffleSetup<E, G2>,
     proof_system: ProofSystem,
@@ -276,7 +276,7 @@ where
 /// Convenience function without setup (for testing/single use)
 pub fn prove<E, G2>(
     seed: G2::BaseField,
-    input_deck: EncryptedDeck<Projective<G2>>,
+    input_deck: Vec<ElGamalCiphertext<Projective<G2>>>,
     shuffler_keys: &ElGamalKeys<Projective<G2>>,
     proof_system: ProofSystem,
 ) -> Result<(Vec<u8>, ProofMetrics), ShuffleError>
@@ -289,12 +289,12 @@ where
     prove_with_setup::<E, G2>(seed, input_deck, shuffler_keys, &setup, proof_system)
 }
 
-fn generate_sample_deck<C: CurveGroup>() -> EncryptedDeck<C>
+fn generate_sample_deck<C: CurveGroup>() -> Vec<ElGamalCiphertext<C>>
 where
     C::ScalarField: PrimeField,
 {
     let generator = C::generator();
-    let dummy_cards: Vec<ElGamalCiphertext<C>> = (0..DECK_SIZE)
+    (0..DECK_SIZE)
         .map(|i| {
             let scalar = C::ScalarField::from((i + 1) as u64);
             let scalar_bigint = scalar.into_bigint();
@@ -303,25 +303,19 @@ where
                 c2: generator.mul_bigint(scalar_bigint),
             }
         })
-        .collect();
-
-    EncryptedDeck::new(dummy_cards).unwrap()
+        .collect()
 }
 
 // Test
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ark_bn254::Bn254;
     use ark_ec::{CurveConfig, PrimeGroup};
     use ark_ff::UniformRand;
-    use ark_grumpkin::{GrumpkinConfig, Projective as GrumpkinProjective};
     use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef};
     use ark_std::rand;
-    use std::{io::BufWriter, sync::Once};
-    use tracing_subscriber::{
-        filter, fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt,
-    };
+    use std::io::BufWriter;
+    use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt};
 
     const TEST_TARGET: &str = "shuffle";
 
@@ -335,7 +329,7 @@ mod tests {
         tracing_subscriber::registry()
             .with(
                 tracing_subscriber::fmt::layer()
-                    .with_span_events(FmtSpan::ENTER | FmtSpan::CLOSE)
+                    .with_span_events(FmtSpan::ENTER)
                     .with_test_writer()
                     .with_file(true)
                     .with_timer(timer)
@@ -381,7 +375,7 @@ mod tests {
         use ark_bn254::{g1, G1Projective};
 
         let input_deck = generate_sample_deck::<G1Projective>();
-        assert_eq!(input_deck.cards.len(), DECK_SIZE);
+        assert_eq!(input_deck.len(), DECK_SIZE);
 
         // BN254 G1 has:
         // - BaseField = Fq (BN254's base field)
@@ -432,15 +426,74 @@ mod tests {
             "Constraint system satisfaction check"
         );
 
-        // if !is_satisfied {
-        //     // Find which constraint is unsatisfied
-        //     if let Some(unsatisfied_constraint_name) = cs.which_is_unsatisfied()? {
-        //         eprintln!("Unsatisfied constraint: {}", unsatisfied_constraint_name);
-        //         eprintln!("Total constraints: {}", cs.num_constraints());
-        //         eprintln!("Total witness variables: {}", cs.num_witness_variables());
-        //         eprintln!("Total instance variables: {}", cs.num_instance_variables());
-        //     }
-        // }
+        if !is_satisfied {
+            // Find which constraint is unsatisfied - returns the constraint name
+            if let Some(unsatisfied_name) = cs.which_is_unsatisfied()? {
+                // Get constraint names to find the index
+                let constraint_names = cs.constraint_names();
+
+                let error_msg = if let Some(names) = constraint_names {
+                    // Find the index of the unsatisfied constraint
+                    let index = names.iter().position(|n| n == &unsatisfied_name);
+
+                    if let Some(idx) = index {
+                        tracing::error!(
+                            target: LOG_TARGET,
+                            "Unsatisfied constraint at index {}: {}",
+                            idx, unsatisfied_name
+                        );
+                        // The constraint name includes the full namespace path
+                        tracing::error!(
+                            target: LOG_TARGET,
+                            "Full namespace path: {}",
+                            unsatisfied_name
+                        );
+                        format!(
+                            "Constraint system is not satisfied. Failed constraint '{}' at index {} (see logs for details)",
+                            unsatisfied_name, idx
+                        )
+                    } else {
+                        tracing::error!(
+                            target: LOG_TARGET,
+                            "Unsatisfied constraint '{}' not found in constraint names list",
+                            unsatisfied_name
+                        );
+                        format!(
+                            "Constraint system is not satisfied. Failed constraint '{}' (index not found)",
+                            unsatisfied_name
+                        )
+                    }
+                } else {
+                    tracing::error!(
+                        target: LOG_TARGET,
+                        "No constraint names available (compile with 'std' feature). Unsatisfied: {}",
+                        unsatisfied_name
+                    );
+                    format!(
+                        "Constraint system is not satisfied. Failed constraint '{}'",
+                        unsatisfied_name
+                    )
+                };
+
+                tracing::error!(
+                    target: LOG_TARGET,
+                    "Total constraints: {}",
+                    cs.num_constraints()
+                );
+                tracing::error!(
+                    target: LOG_TARGET,
+                    "Total witness variables: {}",
+                    cs.num_witness_variables()
+                );
+                tracing::error!(
+                    target: LOG_TARGET,
+                    "Total instance variables: {}",
+                    cs.num_instance_variables()
+                );
+
+                return Err(Box::new(ShuffleError::UnsatisfiedConstraint(error_msg)));
+            }
+        }
 
         Ok(())
     }
@@ -713,8 +766,8 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_sample_deck_snark() -> Result<(), Box<dyn std::error::Error>> {
-        let _ = setup_test_tracing();
+    fn test_snark_generate_sample_deck() -> Result<(), Box<dyn std::error::Error>> {
+        let _gaurd = setup_test_tracing();
         // Use Grumpkin curve
         use ark_bn254::Bn254;
         use ark_grumpkin::{GrumpkinConfig, Projective as GrumpkinProjective};

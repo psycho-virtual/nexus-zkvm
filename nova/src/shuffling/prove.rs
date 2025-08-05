@@ -6,10 +6,10 @@ use ark_std::UniformRand;
 
 const LOG_TARGET: &str = "shuffle::subprotocol";
 
-#[tracing::instrument(target = LOG_TARGET, skip(input_deck, shuffler_keys))]
+#[tracing::instrument(target = LOG_TARGET, name= "prove_shuffle", skip(input_deck, shuffler_keys))]
 pub fn prove_as_subprotocol<C: CurveGroup>(
     seed: C::BaseField,
-    input_deck: EncryptedDeck<C>,
+    input_deck: Vec<ElGamalCiphertext<C>>,
     shuffler_keys: &ElGamalKeys<C>,
 ) -> Result<ShuffleProof<C>, ShuffleError>
 where
@@ -17,21 +17,32 @@ where
 {
     tracing::info!(target = LOG_TARGET, "Starting shuffle proof generation");
 
+    // Validate deck size
+    if input_deck.len() != DECK_SIZE {
+        return Err(ShuffleError::InvalidDeckSize(input_deck.len()));
+    }
+
     // 1. Generate random values for sorting using Poseidon with seed
     let random_values = generate_random_values::<C::BaseField>(seed, DECK_SIZE);
     tracing::debug!(
-        target = LOG_TARGET,
+        target: LOG_TARGET,
         "Generated {} random sorting values",
         DECK_SIZE
     );
 
+    tracing::debug!(
+        target: LOG_TARGET,
+        "First 10 random values: {:?}",
+        &random_values[0..10.min(random_values.len())]
+    );
+
     // 2. Generate rerandomization values r'_i (scalars in the scalar field)
     let mut rng = ark_std::test_rng(); // In production, use a secure RNG
-    let rerandomization_values: Vec<C::BaseField> = (0..DECK_SIZE)
-        .map(|_| C::BaseField::rand(&mut rng))
+    let rerandomization_values: Vec<C::ScalarField> = (0..DECK_SIZE)
+        .map(|_| C::ScalarField::rand(&mut rng))
         .collect();
     tracing::debug!(
-        target = LOG_TARGET,
+        target: LOG_TARGET,
         "Generated {} rerandomization values",
         DECK_SIZE
     );
@@ -40,10 +51,9 @@ where
     //    - New c1 = c1 + r'_i * G
     //    - New c2 = c2 + r'_i * Y (where Y is shuffler's public key)
     let rerandomized_cards: Vec<ElGamalCiphertext<C>> = input_deck
-        .cards
         .iter()
         .zip(&rerandomization_values)
-        .map(|(card, &rerand)| card.add_encryption_layer(rerand, shuffler_keys.public_key)) // TODO: maybe we can remove the need of using the other field
+        .map(|(card, &rerand)| card.add_encryption_layer(rerand, shuffler_keys.public_key))
         .collect();
     tracing::debug!(target = LOG_TARGET, "Re-randomized all cards");
 

@@ -12,12 +12,9 @@ pub fn generate_random_values<F: Absorb + PrimeField>(seed: F, count: usize) -> 
     sponge.absorb(&seed);
 
     // Generate random values
-    let mut values = Vec::with_capacity(count);
-    for _ in 0..count {
-        let value = sponge.squeeze_field_elements(1)[0];
-        tracing::debug!(target: LOG_TARGET, "Generating random value {}", value);
-        values.push(value);
-    }
+    let values: Vec<F> = (0..count)
+        .map(|_| sponge.squeeze_field_elements(1)[0])
+        .collect();
 
     values
 }
