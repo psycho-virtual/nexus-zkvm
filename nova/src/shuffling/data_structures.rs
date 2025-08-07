@@ -1,7 +1,7 @@
 use super::error::ShuffleError;
 use ark_ec::short_weierstrass::{Projective, SWCurveConfig};
 use ark_ec::CurveGroup;
-use ark_ff::PrimeField;
+use ark_ff::{Field, PrimeField};
 use ark_r1cs_std::groups::curves::short_weierstrass::ProjectiveVar;
 use ark_r1cs_std::{fields::fp::FpVar, prelude::*, R1CSVar};
 use ark_relations::r1cs;
@@ -33,7 +33,7 @@ pub struct ElGamalCiphertext<C: CurveGroup> {
 
 impl<C: CurveGroup> ElGamalCiphertext<C>
 where
-    C::BaseField: PrimeField,
+    C::BaseField: Field,
 {
     pub fn new(c1: C, c2: C) -> Self {
         Self { c1, c2 }
@@ -146,6 +146,7 @@ where
 }
 
 // Circuit representation of ElGamal ciphertext
+#[derive(Clone)]
 pub struct ElGamalCiphertextVar<G: SWCurveConfig>
 where
     G::BaseField: PrimeField,

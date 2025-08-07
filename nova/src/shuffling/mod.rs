@@ -3,6 +3,7 @@ pub mod data_structures;
 pub mod encryption;
 pub mod error;
 pub mod prove;
+pub mod rs_shuffle;
 pub mod setup;
 pub mod utils;
 
