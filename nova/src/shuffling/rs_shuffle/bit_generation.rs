@@ -69,7 +69,7 @@ pub fn derive_split_bits<F: Field + PrimeField + ark_crypto_primitives::sponge::
         // This produces exactly F::MODULUS_BIT_SIZE bits
         let value_bigint = value.into_bigint();
         let mut value_bits = Vec::with_capacity(F::MODULUS_BIT_SIZE as usize);
-        
+
         // Extract bits from the BigInteger representation
         for i in 0..(F::MODULUS_BIT_SIZE as usize) {
             value_bits.push(value_bigint.get_bit(i));
@@ -95,7 +95,6 @@ pub fn derive_split_bits<F: Field + PrimeField + ark_crypto_primitives::sponge::
 
     (bit_matrix, num_elements_needed)
 }
-
 
 /// SNARK circuit version: Derive split bits from seed using Poseidon hash
 ///
@@ -266,7 +265,6 @@ mod tests {
         // At least 25% should be different (very conservative bound)
         assert!(differences > (N * LEVELS) / 4);
     }
-
 
     #[test]
     fn test_derive_split_bits_circuit_dimensions() {
