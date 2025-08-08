@@ -153,7 +153,7 @@ where
     /// Compute the grand product for a deck of cards
     fn compute_deck_product<'a, I>(
         &self,
-        cs: ConstraintSystemRef<G::BaseField>,
+        _cs: ConstraintSystemRef<G::BaseField>,
         deck: I,
         alpha: &FpVar<G::BaseField>,
         beta: &FpVar<G::BaseField>,

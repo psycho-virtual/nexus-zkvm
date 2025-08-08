@@ -1,6 +1,6 @@
 //! Main circuit implementation for RS shuffle with constraint generation
 
-use super::data_structures::{NextRowVar, UnsortedRowVar, WitnessData, WitnessDataVar};
+use super::data_structures::{UnsortedRowVar, WitnessData, WitnessDataVar};
 use super::permutation::{check_grand_product, IndexPositionPair, IndexedElGamalCiphertext};
 use super::{LEVELS, N};
 use crate::shuffling::data_structures::{ElGamalCiphertext, ElGamalCiphertextVar};
@@ -15,13 +15,7 @@ use ark_r1cs_std::{
     fields::FieldVar,
 };
 use ark_r1cs_std::{fields::fp::FpVar, prelude::*};
-use ark_relations::*;
-use ark_relations::{
-    lc,
-    r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError},
-};
-use std::ops::Add;
-use std::ops::Mul;
+use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
 use std::ops::Not;
 
 /// Main RS Shuffle Circuit
@@ -36,7 +30,7 @@ where
     pub seed_pub: F,
 
     /// Private: Witness data for all levels
-    pub witness: WitnessData,
+    pub witness: WitnessData<N, LEVELS>,
     /// Public: Fiat-Shamir challenges (same for all levels)
     pub alpha: F,
     pub beta: F, // beta_2 through beta_6 are computed as powers of beta
@@ -53,7 +47,7 @@ where
         ct_init: Vec<ElGamalCiphertext<C>>,
         ct_after_shuffle: Vec<ElGamalCiphertext<C>>,
         seed: F,
-        witness: WitnessData,
+        witness: WitnessData<N, LEVELS>,
         alpha: F,
         beta: F,
     ) -> Self {
@@ -84,7 +78,7 @@ where
         cs: ConstraintSystemRef<G::BaseField>,
     ) -> Result<(), SynthesisError> {
         // 1. Allocate public inputs
-        let ct_init_vars: Vec<ElGamalCiphertextVar<G>> = self
+        let _ct_init_vars: Vec<ElGamalCiphertextVar<G>> = self
             .ct_init_pub
             .iter()
             .map(|ct| {
@@ -97,7 +91,7 @@ where
             .collect::<Result<Vec<_>, _>>()?;
 
         // Allocate the final shuffled ciphertexts as indexed ciphertexts with their positions
-        let ciphertexts_final: Vec<IndexedElGamalCiphertext<G>> = self
+        let _ciphertexts_final: Vec<IndexedElGamalCiphertext<G>> = self
             .ct_after_shuffle
             .iter()
             .enumerate()
@@ -113,7 +107,7 @@ where
             .collect::<Result<Vec<_>, _>>()?;
 
         // 2. Allocate witness data using AllocVar
-        let witness_var = WitnessDataVar::<G::BaseField>::new_variable(
+        let witness_var = WitnessDataVar::<G::BaseField, N, LEVELS>::new_variable(
             cs.clone(),
             || Ok(&self.witness),
             AllocationMode::Witness,
@@ -128,35 +122,15 @@ where
         let beta_3_var = &beta_2_var * &beta_var; // beta^3 (was delta)
         let beta_4_var = &beta_3_var * &beta_var; // beta^4 (was epsilon)
         let beta_5_var = &beta_4_var * &beta_var; // beta^5 (was zeta)
-        let beta_6_var = &beta_5_var * &beta_var; // beta^6 (was eta)
+        let _beta_6_var = &beta_5_var * &beta_var; // beta^6 (was eta)
 
         // 4. Level-by-level verification
         for level in 0..LEVELS {
             let unsorted = &witness_var.uns_levels[level];
             let next_arr = &witness_var.next_levels[level];
 
-            // 4.1 Verify row-local constraints
-            let idx_next_pos_pairs = verify_row_constraints(cs.clone(), unsorted)?;
-
-            // 4.2 Build right-side pairs (idx, pos) from next array
-            let idx_pos_pairs: Vec<IndexPositionPair<G::BaseField>> = next_arr
-                .iter()
-                .enumerate()
-                .map(|(j, nr)| {
-                    IndexPositionPair::new(
-                        nr.idx.clone(),
-                        FpVar::new_constant(cs.clone(), G::BaseField::from(j as u64)).unwrap(),
-                    )
-                })
-                .collect();
-
-            // 4.3 Check multiset equality for this level using 2 challenges
-            check_grand_product::<G::BaseField, IndexPositionPair<G::BaseField>, 2>(
-                cs.clone(),
-                &idx_next_pos_pairs,
-                &idx_pos_pairs,
-                &[alpha_var.clone(), beta_var.clone()],
-            )?;
+            // Verify this shuffle level (row constraints + permutation check)
+            verify_shuffle_level::<_, N>(cs.clone(), unsorted, next_arr, &alpha_var, &beta_var)?;
         }
 
         // // 5. Final permutation check using ElGamal ciphertexts (7 challenges)
@@ -177,7 +151,7 @@ where
 }
 
 /// Verify row-local constraints for one level using circuit variables
-pub fn verify_row_constraints<F>(
+pub fn verify_row_constraints<F, const N: usize>(
     cs: ConstraintSystemRef<F>,
     unsorted: &[UnsortedRowVar<F>; N],
 ) -> Result<Vec<IndexPositionPair<F>>, SynthesisError>
@@ -331,4 +305,513 @@ where
     }
 
     Ok(idx_next_pos_pairs)
+}
+
+/// Verify one level of the RS shuffle including row constraints and permutation check
+///
+/// This function encapsulates:
+/// 1. Row-local constraint verification (bitness, counter evolution, bucket constants, destination computation)
+/// 2. Building the right-side index-position pairs from the next array
+/// 3. Checking multiset equality using grand product with provided challenges
+///
+/// # Type Parameters
+/// - `F`: The prime field type
+/// - `N`: The size of the arrays (number of elements)
+///
+/// # Parameters
+/// - `cs`: The constraint system reference
+/// - `unsorted`: The unsorted row variables for this level
+/// - `next_arr`: The next (sorted) row variables for this level
+/// - `alpha`: The first challenge for the grand product
+/// - `beta`: The second challenge for the grand product
+///
+/// # Returns
+/// - `Ok(())` if all constraints are satisfied
+/// - `Err(SynthesisError)` if any constraint fails
+pub fn verify_shuffle_level<F, const N: usize>(
+    cs: ConstraintSystemRef<F>,
+    unsorted: &[UnsortedRowVar<F>; N],
+    next_arr: &[super::data_structures::SortedRowVar<F>; N],
+    alpha: &FpVar<F>,
+    beta: &FpVar<F>,
+) -> Result<(), SynthesisError>
+where
+    F: PrimeField,
+{
+    // Step 1: Verify row-local constraints
+    let idx_next_pos_pairs = verify_row_constraints::<_, N>(cs.clone(), unsorted)?;
+
+    // Step 2: Build right-side pairs (idx, pos) from next array
+    let idx_pos_pairs: Vec<IndexPositionPair<F>> = next_arr
+        .iter()
+        .enumerate()
+        .map(|(j, nr)| {
+            IndexPositionPair::new(
+                nr.idx.clone(),
+                FpVar::new_constant(cs.clone(), F::from(j as u64)).unwrap(),
+            )
+        })
+        .collect();
+
+    // Step 3: Check multiset equality for this level using 2 challenges
+    check_grand_product::<F, IndexPositionPair<F>, 2>(
+        cs,
+        &idx_next_pos_pairs,
+        &idx_pos_pairs,
+        &[alpha.clone(), beta.clone()],
+    )?;
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shuffling::rs_shuffle::data_structures::{
+        SortedRow, SortedRowVar, UnsortedRow, UnsortedRowVar,
+    };
+    use crate::shuffling::rs_shuffle::witness_preparation::build_level;
+    use ark_bls12_381::Fr as TestField;
+    use ark_r1cs_std::alloc::AllocVar;
+    use ark_relations::r1cs::{ConstraintSystem, ConstraintSystemRef};
+    use tracing_subscriber::{
+        filter, fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt,
+    };
+
+    const TEST_TARGET: &str = "rs_shuffle::tests";
+    const LOG_TARGET: &str = "rs_shuffle::circuit";
+
+    fn setup_test_tracing() -> tracing::subscriber::DefaultGuard {
+        let filter = filter::Targets::new()
+            .with_target(TEST_TARGET, tracing::Level::DEBUG)
+            .with_target(LOG_TARGET, tracing::Level::DEBUG);
+
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_span_events(FmtSpan::ENTER | FmtSpan::CLOSE)
+                    .with_test_writer(), // This ensures output goes to test stdout
+            )
+            .with(filter)
+            .set_default()
+    }
+
+    /// Helper function to allocate an array of UnsortedRow as UnsortedRowVar in the constraint system
+    fn allocate_unsorted_rows<F: PrimeField, const N: usize>(
+        cs: ConstraintSystemRef<F>,
+        unsorted: &[UnsortedRow; N],
+    ) -> Result<[UnsortedRowVar<F>; N], SynthesisError> {
+        let vars: Vec<UnsortedRowVar<F>> = unsorted
+            .iter()
+            .map(|row| {
+                UnsortedRowVar::<F>::new_variable(cs.clone(), || Ok(row), AllocationMode::Witness)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        vars.try_into().map_err(|_| SynthesisError::Unsatisfiable)
+    }
+
+    /// Helper function to allocate an array of SortedRow as SortedRowVar in the constraint system
+    fn allocate_next_rows<F: PrimeField, const N: usize>(
+        cs: ConstraintSystemRef<F>,
+        next_rows: &[SortedRow; N],
+    ) -> Result<[SortedRowVar<F>; N], SynthesisError> {
+        let vars: Vec<SortedRowVar<F>> = next_rows
+            .iter()
+            .map(|row| {
+                SortedRowVar::<F>::new_variable(cs.clone(), || Ok(row), AllocationMode::Witness)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        vars.try_into().map_err(|_| SynthesisError::Unsatisfiable)
+    }
+
+    /// Helper function to check if constraint system is satisfied and provide detailed error info
+    fn check_cs_satisfied<F: PrimeField>(cs: &ConstraintSystemRef<F>) -> Result<(), String> {
+        match cs.is_satisfied() {
+            Ok(true) => Ok(()),
+            Ok(false) => {
+                // Try to get which constraint is unsatisfied
+                match cs.which_is_unsatisfied() {
+                    Ok(Some(unsatisfied_name)) => {
+                        // Find the index if we have constraint names
+                        let constraint_names = cs.constraint_names().unwrap_or_default();
+                        let index = constraint_names
+                            .iter()
+                            .position(|name| name == &unsatisfied_name)
+                            .map(|i| format!(" at index {}", i))
+                            .unwrap_or_default();
+                        Err(format!(
+                            "Constraint '{}'{} is not satisfied",
+                            unsatisfied_name, index
+                        ))
+                    }
+                    Ok(None) => Err("Constraint system is not satisfied".to_string()),
+                    Err(e) => Err(format!("Error checking unsatisfied constraint: {:?}", e)),
+                }
+            }
+            Err(e) => Err(format!("Error checking constraint satisfaction: {:?}", e)),
+        }
+    }
+
+    #[test]
+    fn test_verify_row_constraints_single_level_alternating() {
+        let _guard = setup_test_tracing();
+        const N: usize = 8;
+
+        // Create a single bucket with all elements
+        let prev_rows: [SortedRow; N] =
+            std::array::from_fn(|i| SortedRow::new_with_bucket(i as u16, N as u16, 0));
+
+        // Alternating bit pattern [0,1,0,1,0,1,0,1]
+        let bits: [bool; N] = [false, true, false, true, false, true, false, true];
+
+        // Generate witness using build_level as oracle
+        let (unsorted, next) = build_level::<N>(&prev_rows, &bits);
+
+        // Create constraint system
+        let cs = ConstraintSystem::<TestField>::new_ref();
+
+        // Allocate unsorted rows in constraint system
+        let unsorted_vars = allocate_unsorted_rows(cs.clone(), &unsorted)
+            .expect("Failed to allocate unsorted rows");
+
+        // Run verify_row_constraints
+        let idx_next_pos_pairs = verify_row_constraints(cs.clone(), &unsorted_vars)
+            .expect("verify_row_constraints failed");
+
+        // Check that constraint system is satisfied
+        check_cs_satisfied(&cs).expect("Constraint system should be satisfied for valid witness");
+
+        // Verify we got the expected number of pairs
+        assert_eq!(idx_next_pos_pairs.len(), N);
+
+        // Additional checks on the witness data
+        // With alternating bits, we should have 4 zeros and 4 ones
+        let zero_count = bits.iter().filter(|&&b| !b).count();
+        let one_count = N - zero_count;
+        assert_eq!(zero_count, 4);
+        assert_eq!(one_count, 4);
+
+        // Verify that zeros are placed in positions 0..4 and ones in 4..8
+        for i in 0..zero_count {
+            assert_eq!(next[i].bucket, 0); // Zeros go to bucket 0
+        }
+        for i in zero_count..N {
+            assert_eq!(next[i].bucket, 1); // Ones go to bucket 1
+        }
+
+        tracing::debug!(target: TEST_TARGET, "✓ Test passed: Single level with alternating bits");
+    }
+
+    #[test]
+    fn test_verify_row_constraints_two_successive_levels() {
+        let _guard = setup_test_tracing();
+        const N: usize = 8;
+
+        // Level 0: Single bucket containing all elements
+        let prev0: [SortedRow; N] =
+            std::array::from_fn(|i| SortedRow::new_with_bucket(i as u16, N as u16, 0));
+
+        // Level 1: Alternating bits [0,1,0,1,0,1,0,1]
+        let bits1: [bool; N] = [false, true, false, true, false, true, false, true];
+
+        // Generate witness for level 1
+        let (unsorted1, next1) = build_level::<N>(&prev0, &bits1);
+
+        // Create constraint system for level 1
+        let cs1 = ConstraintSystem::<TestField>::new_ref();
+
+        // Allocate and verify level 1
+        let unsorted1_vars = allocate_unsorted_rows(cs1.clone(), &unsorted1)
+            .expect("Failed to allocate level 1 unsorted rows");
+
+        let idx_next_pos_pairs1 = verify_row_constraints(cs1.clone(), &unsorted1_vars)
+            .expect("verify_row_constraints failed for level 1");
+
+        check_cs_satisfied(&cs1)
+            .expect("Level 1: Constraint system should be satisfied for valid witness");
+
+        assert_eq!(idx_next_pos_pairs1.len(), N);
+
+        // Verify level 1 produced correct buckets
+        assert!(next1[0..4].iter().all(|r| r.bucket == 0));
+        assert!(next1[4..8].iter().all(|r| r.bucket == 1));
+
+        tracing::debug!(target: TEST_TARGET, "✓ Level 1 verification passed");
+
+        // Level 2: Different bit pattern to split each bucket
+        // For bucket 0 (indices 0,2,4,6): [1,0,0,1]
+        // For bucket 1 (indices 1,3,5,7): [0,1,1,0]
+        let bits2: [bool; N] = [true, false, false, true, false, true, true, false];
+
+        // Generate witness for level 2
+        let (unsorted2, next2) = build_level::<N>(&next1, &bits2);
+
+        // Create constraint system for level 2
+        let cs2 = ConstraintSystem::<TestField>::new_ref();
+
+        // Allocate and verify level 2
+        let unsorted2_vars = allocate_unsorted_rows(cs2.clone(), &unsorted2)
+            .expect("Failed to allocate level 2 unsorted rows");
+
+        let idx_next_pos_pairs2 = verify_row_constraints(cs2.clone(), &unsorted2_vars)
+            .expect("verify_row_constraints failed for level 2");
+
+        check_cs_satisfied(&cs2)
+            .expect("Level 2: Constraint system should be satisfied for valid witness");
+
+        assert_eq!(idx_next_pos_pairs2.len(), N);
+
+        // Verify level 2 produced 4 buckets (0,1,2,3)
+        assert!(next2[0..2].iter().all(|r| r.bucket == 0));
+        assert!(next2[2..4].iter().all(|r| r.bucket == 1));
+        assert!(next2[4..6].iter().all(|r| r.bucket == 2));
+        assert!(next2[6..8].iter().all(|r| r.bucket == 3));
+
+        tracing::debug!(target: TEST_TARGET, "✓ Level 2 verification passed");
+        tracing::debug!(target: TEST_TARGET, "✓ Test passed: Two successive levels");
+    }
+
+    #[test]
+    fn test_verify_row_constraints_edge_cases() {
+        let _guard = setup_test_tracing();
+        const N: usize = 4;
+
+        // Test case 1: All zeros
+        let prev_all_zeros: [SortedRow; N] =
+            std::array::from_fn(|i| SortedRow::new_with_bucket(i as u16, N as u16, 0));
+        let bits_all_zeros: [bool; N] = [false; N];
+        let (unsorted_zeros, next_zeros) = build_level::<N>(&prev_all_zeros, &bits_all_zeros);
+
+        let cs_zeros = ConstraintSystem::<TestField>::new_ref();
+        let unsorted_zeros_vars = allocate_unsorted_rows(cs_zeros.clone(), &unsorted_zeros)
+            .expect("Failed to allocate all-zeros unsorted rows");
+
+        let pairs_zeros = verify_row_constraints(cs_zeros.clone(), &unsorted_zeros_vars)
+            .expect("verify_row_constraints failed for all zeros");
+
+        check_cs_satisfied(&cs_zeros).expect("All zeros: Constraint system should be satisfied");
+
+        // All elements should stay in bucket 0
+        assert!(next_zeros.iter().all(|r| r.bucket == 0));
+        assert_eq!(pairs_zeros.len(), N);
+
+        tracing::debug!(target: TEST_TARGET, "✓ Edge case passed: All zeros");
+
+        // Test case 2: All ones
+        let prev_all_ones: [SortedRow; N] =
+            std::array::from_fn(|i| SortedRow::new_with_bucket(i as u16, N as u16, 0));
+        let bits_all_ones: [bool; N] = [true; N];
+        let (unsorted_ones, next_ones) = build_level::<N>(&prev_all_ones, &bits_all_ones);
+
+        let cs_ones = ConstraintSystem::<TestField>::new_ref();
+        let unsorted_ones_vars = allocate_unsorted_rows(cs_ones.clone(), &unsorted_ones)
+            .expect("Failed to allocate all-ones unsorted rows");
+
+        let pairs_ones = verify_row_constraints(cs_ones.clone(), &unsorted_ones_vars)
+            .expect("verify_row_constraints failed for all ones");
+
+        check_cs_satisfied(&cs_ones).expect("All ones: Constraint system should be satisfied");
+
+        // All elements should go to bucket 1
+        assert!(next_ones.iter().all(|r| r.bucket == 1));
+        assert_eq!(pairs_ones.len(), N);
+
+        tracing::debug!(target: TEST_TARGET, "✓ Edge case passed: All ones");
+    }
+
+    #[test]
+    fn test_verify_row_constraints_multi_bucket() {
+        let _guard = setup_test_tracing();
+        const N: usize = 6;
+
+        // Create two initial buckets
+        let prev_rows: [SortedRow; N] = [
+            SortedRow::new_with_bucket(0, 3, 0),
+            SortedRow::new_with_bucket(1, 3, 0),
+            SortedRow::new_with_bucket(2, 3, 0),
+            SortedRow::new_with_bucket(3, 3, 1),
+            SortedRow::new_with_bucket(4, 3, 1),
+            SortedRow::new_with_bucket(5, 3, 1),
+        ];
+
+        // Mixed bit pattern: [0,1,0 | 1,0,1]
+        let bits: [bool; N] = [false, true, false, true, false, true];
+
+        // Generate witness
+        let (unsorted, next) = build_level::<N>(&prev_rows, &bits);
+
+        // Create constraint system
+        let cs = ConstraintSystem::<TestField>::new_ref();
+
+        // Allocate unsorted rows
+        let unsorted_vars = allocate_unsorted_rows(cs.clone(), &unsorted)
+            .expect("Failed to allocate multi-bucket unsorted rows");
+
+        // Run verify_row_constraints
+        let idx_next_pos_pairs = verify_row_constraints(cs.clone(), &unsorted_vars)
+            .expect("verify_row_constraints failed for multi-bucket");
+
+        // Check constraint satisfaction
+        check_cs_satisfied(&cs).expect("Multi-bucket: Constraint system should be satisfied");
+
+        assert_eq!(idx_next_pos_pairs.len(), N);
+
+        // Verify bucket assignments
+        // Bucket 0 splits into buckets 0 (2 zeros) and 1 (1 one)
+        assert_eq!(next[0].bucket, 0);
+        assert_eq!(next[1].bucket, 0);
+        assert_eq!(next[2].bucket, 1);
+
+        // Bucket 1 splits into buckets 2 (1 zero) and 3 (2 ones)
+        assert_eq!(next[3].bucket, 2);
+        assert_eq!(next[4].bucket, 3);
+        assert_eq!(next[5].bucket, 3);
+
+        tracing::debug!(target: TEST_TARGET, "✓ Test passed: Multi-bucket configuration");
+    }
+
+    #[test]
+    fn test_verify_shuffle_level_single() {
+        let _guard = setup_test_tracing();
+        const N: usize = 8;
+
+        tracing::debug!(target: TEST_TARGET, "Starting test_verify_shuffle_level_single");
+
+        // Create a single bucket with all elements
+        let prev_rows: [SortedRow; N] =
+            std::array::from_fn(|i| SortedRow::new_with_bucket(i as u16, N as u16, 0));
+
+        // Alternating bit pattern [0,1,0,1,0,1,0,1]
+        let bits: [bool; N] = [false, true, false, true, false, true, false, true];
+
+        // Generate witness using build_level as oracle
+        let (unsorted, next) = build_level::<N>(&prev_rows, &bits);
+
+        // Create constraint system
+        let cs = ConstraintSystem::<TestField>::new_ref();
+
+        // Allocate unsorted rows in constraint system
+        let unsorted_vars = allocate_unsorted_rows(cs.clone(), &unsorted)
+            .expect("Failed to allocate unsorted rows");
+
+        // Allocate next rows in constraint system
+        let next_vars =
+            allocate_next_rows(cs.clone(), &next).expect("Failed to allocate next rows");
+
+        // Create test challenges
+        let alpha =
+            FpVar::new_constant(cs.clone(), TestField::from(2u64)).expect("Failed to create alpha");
+        let beta =
+            FpVar::new_constant(cs.clone(), TestField::from(3u64)).expect("Failed to create beta");
+
+        // Run verify_shuffle_level
+        verify_shuffle_level::<_, N>(cs.clone(), &unsorted_vars, &next_vars, &alpha, &beta)
+            .expect("verify_shuffle_level failed");
+
+        // Check that constraint system is satisfied
+        check_cs_satisfied(&cs).expect("Constraint system should be satisfied for valid shuffle");
+
+        // Verify expected structure
+        let zero_count = bits.iter().filter(|&&b| !b).count();
+        let one_count = N - zero_count;
+        assert_eq!(zero_count, 4);
+        assert_eq!(one_count, 4);
+
+        // Verify that zeros are placed in positions 0..4 and ones in 4..8
+        for i in 0..zero_count {
+            assert_eq!(next[i].bucket, 0); // Zeros go to bucket 0
+        }
+        for i in zero_count..N {
+            assert_eq!(next[i].bucket, 1); // Ones go to bucket 1
+        }
+
+        tracing::debug!(target: TEST_TARGET, "✓ Test passed: Single shuffle level verification");
+    }
+
+    #[test]
+    fn test_verify_shuffle_level_two_successive() {
+        let _guard = setup_test_tracing();
+        const N: usize = 8;
+
+        tracing::debug!(target: TEST_TARGET, "Starting test_verify_shuffle_level_two_successive");
+
+        // Level 0: Single bucket containing all elements
+        let prev0: [SortedRow; N] =
+            std::array::from_fn(|i| SortedRow::new_with_bucket(i as u16, N as u16, 0));
+
+        // Level 1: Alternating bits [0,1,0,1,0,1,0,1]
+        let bits1: [bool; N] = [false, true, false, true, false, true, false, true];
+
+        // Generate witness for level 1
+        let (unsorted1, next1) = build_level::<N>(&prev0, &bits1);
+
+        // Create constraint system for level 1
+        let cs1 = ConstraintSystem::<TestField>::new_ref();
+
+        // Allocate level 1 variables
+        let unsorted1_vars = allocate_unsorted_rows(cs1.clone(), &unsorted1)
+            .expect("Failed to allocate level 1 unsorted rows");
+        let next1_vars =
+            allocate_next_rows(cs1.clone(), &next1).expect("Failed to allocate level 1 next rows");
+
+        // Create test challenges for level 1
+        let alpha1 = FpVar::new_constant(cs1.clone(), TestField::from(5u64))
+            .expect("Failed to create alpha1");
+        let beta1 = FpVar::new_constant(cs1.clone(), TestField::from(7u64))
+            .expect("Failed to create beta1");
+
+        // Verify level 1
+        verify_shuffle_level::<_, N>(cs1.clone(), &unsorted1_vars, &next1_vars, &alpha1, &beta1)
+            .expect("verify_shuffle_level failed for level 1");
+
+        check_cs_satisfied(&cs1)
+            .expect("Level 1: Constraint system should be satisfied for valid shuffle");
+
+        // Verify level 1 produced correct buckets
+        assert!(next1[0..4].iter().all(|r| r.bucket == 0));
+        assert!(next1[4..8].iter().all(|r| r.bucket == 1));
+
+        tracing::debug!(target: TEST_TARGET, "✓ Level 1 shuffle verification passed");
+
+        // Level 2: Different bit pattern to split each bucket
+        // For bucket 0 (indices 0,2,4,6): [1,0,0,1]
+        // For bucket 1 (indices 1,3,5,7): [0,1,1,0]
+        let bits2: [bool; N] = [true, false, false, true, false, true, true, false];
+
+        // Generate witness for level 2
+        let (unsorted2, next2) = build_level::<N>(&next1, &bits2);
+
+        // Create constraint system for level 2
+        let cs2 = ConstraintSystem::<TestField>::new_ref();
+
+        // Allocate level 2 variables
+        let unsorted2_vars = allocate_unsorted_rows(cs2.clone(), &unsorted2)
+            .expect("Failed to allocate level 2 unsorted rows");
+        let next2_vars =
+            allocate_next_rows(cs2.clone(), &next2).expect("Failed to allocate level 2 next rows");
+
+        // Create test challenges for level 2
+        let alpha2 = FpVar::new_constant(cs2.clone(), TestField::from(11u64))
+            .expect("Failed to create alpha2");
+        let beta2 = FpVar::new_constant(cs2.clone(), TestField::from(13u64))
+            .expect("Failed to create beta2");
+
+        // Verify level 2
+        verify_shuffle_level::<_, N>(cs2.clone(), &unsorted2_vars, &next2_vars, &alpha2, &beta2)
+            .expect("verify_shuffle_level failed for level 2");
+
+        check_cs_satisfied(&cs2)
+            .expect("Level 2: Constraint system should be satisfied for valid shuffle");
+
+        // Verify level 2 produced 4 buckets (0,1,2,3)
+        assert!(next2[0..2].iter().all(|r| r.bucket == 0));
+        assert!(next2[2..4].iter().all(|r| r.bucket == 1));
+        assert!(next2[4..6].iter().all(|r| r.bucket == 2));
+        assert!(next2[6..8].iter().all(|r| r.bucket == 3));
+
+        tracing::debug!(target: TEST_TARGET, "✓ Level 2 shuffle verification passed");
+        tracing::debug!(target: TEST_TARGET, "✓ Test passed: Two successive shuffle levels verification");
+    }
 }

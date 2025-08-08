@@ -1499,7 +1499,7 @@ mod tests {
             .zip(all_random_values.iter())
             .enumerate()
         {
-            let circuit_value = circuit_val.value()?;
+            let _circuit_value = circuit_val.value()?;
         }
         tracing::info!(target: TEST_TARGET, "✅ All random values match between native and circuit execution");
 

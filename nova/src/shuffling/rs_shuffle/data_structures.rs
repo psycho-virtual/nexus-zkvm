@@ -1,5 +1,4 @@
-use super::{LEVELS, N};
-use ark_ff::{Field, PrimeField};
+use ark_ff::PrimeField;
 use ark_r1cs_std::{fields::fp::FpVar, prelude::*};
 use ark_relations::{r1cs, r1cs::SynthesisError};
 use std::borrow::Borrow;
@@ -38,12 +37,12 @@ pub struct SortedRow {
 
 /// Witness data for all levels
 #[derive(Clone, Debug)]
-pub struct WitnessData {
+pub struct WitnessData<const N: usize, const LEVELS: usize> {
     /// Split bits matrix (LEVELS × N)
     pub bits_mat: [[bool; N]; LEVELS],
     /// Unsorted witness rows per level
     pub uns_levels: [[UnsortedRow; N]; LEVELS],
-    /// Next-array per level
+    /// Next-arraycar per level
     pub next_levels: [[SortedRow; N]; LEVELS],
 }
 
@@ -137,9 +136,9 @@ impl<F: PrimeField> AllocVar<UnsortedRow, F> for UnsortedRowVar<F> {
     }
 }
 
-/// Circuit variable version of NextRow for use in SNARK constraints
+/// Circuit variable version of SortedRow for use in SNARK constraints
 #[derive(Clone)]
-pub struct NextRowVar<F>
+pub struct SortedRowVar<F>
 where
     F: PrimeField,
 {
@@ -151,7 +150,7 @@ where
     pub bucket: FpVar<F>,
 }
 
-impl<F: PrimeField> AllocVar<SortedRow, F> for NextRowVar<F> {
+impl<F: PrimeField> AllocVar<SortedRow, F> for SortedRowVar<F> {
     fn new_variable<T: Borrow<SortedRow>>(
         cs: impl Into<r1cs::Namespace<F>>,
         f: impl FnOnce() -> Result<T, SynthesisError>,
@@ -171,17 +170,19 @@ impl<F: PrimeField> AllocVar<SortedRow, F> for NextRowVar<F> {
 
 /// Circuit variable version of WitnessData for use in SNARK constraints
 #[derive(Clone)]
-pub struct WitnessDataVar<F: PrimeField> {
+pub struct WitnessDataVar<F: PrimeField, const N: usize, const LEVELS: usize> {
     /// Split bits matrix (LEVELS × N) as witness variables
     pub bits_mat: [[FpVar<F>; N]; LEVELS],
     /// Unsorted witness rows per level
     pub uns_levels: [[UnsortedRowVar<F>; N]; LEVELS],
     /// Next-array per level
-    pub next_levels: [[NextRowVar<F>; N]; LEVELS],
+    pub next_levels: [[SortedRowVar<F>; N]; LEVELS],
 }
 
-impl<F: PrimeField> AllocVar<WitnessData, F> for WitnessDataVar<F> {
-    fn new_variable<T: Borrow<WitnessData>>(
+impl<F: PrimeField, const N: usize, const LEVELS: usize> AllocVar<WitnessData<N, LEVELS>, F>
+    for WitnessDataVar<F, N, LEVELS>
+{
+    fn new_variable<T: Borrow<WitnessData<N, LEVELS>>>(
         cs: impl Into<r1cs::Namespace<F>>,
         f: impl FnOnce() -> Result<T, SynthesisError>,
         mode: AllocationMode,
@@ -237,26 +238,26 @@ impl<F: PrimeField> AllocVar<WitnessData, F> for WitnessDataVar<F> {
             .try_into()
             .map_err(|_| SynthesisError::Unsatisfiable)?;
 
-        // Helper to allocate a next row
-        let alloc_next_row =
-            |row: &SortedRow| NextRowVar::<F>::new_variable(cs.clone(), || Ok(row), mode);
+        // Helper to allocate a sorted row
+        let alloc_sorted_row =
+            |row: &SortedRow| SortedRowVar::<F>::new_variable(cs.clone(), || Ok(row), mode);
 
-        // Helper to allocate a level of next rows
-        let alloc_next_level =
-            |level: &[SortedRow; N]| -> Result<[NextRowVar<F>; N], SynthesisError> {
+        // Helper to allocate a level of sorted rows
+        let alloc_sorted_level =
+            |level: &[SortedRow; N]| -> Result<[SortedRowVar<F>; N], SynthesisError> {
                 level
                     .iter()
-                    .map(alloc_next_row)
+                    .map(alloc_sorted_row)
                     .collect::<Result<Vec<_>, _>>()?
                     .try_into()
                     .map_err(|_| SynthesisError::Unsatisfiable)
             };
 
-        // Allocate all next rows immutably
+        // Allocate all sorted rows immutably
         let next_levels = witness_data
             .next_levels
             .iter()
-            .map(alloc_next_level)
+            .map(alloc_sorted_level)
             .collect::<Result<Vec<_>, _>>()?
             .try_into()
             .map_err(|_| SynthesisError::Unsatisfiable)?;
@@ -265,7 +266,7 @@ impl<F: PrimeField> AllocVar<WitnessData, F> for WitnessDataVar<F> {
     }
 }
 
-impl<F: PrimeField> WitnessDataVar<F> {
+impl<F: PrimeField, const N: usize, const LEVELS: usize> WitnessDataVar<F, N, LEVELS> {
     /// Get the number of levels in the witness data (always LEVELS)
     pub const fn num_levels(&self) -> usize {
         LEVELS

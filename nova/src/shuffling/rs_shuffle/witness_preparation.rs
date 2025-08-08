@@ -7,7 +7,7 @@ use ark_ec::CurveGroup;
 use ark_ff::{Field, PrimeField};
 
 /// Main witness preparation function (prover-side)
-pub fn prepare_witness_data<F, C>(ct_init: &[ElGamalCiphertext<C>], _seed: &[u8]) -> WitnessData
+pub fn prepare_witness_data<F, C>(ct_init: &[ElGamalCiphertext<C>], _seed: &[u8]) -> WitnessData<N, LEVELS>
 where
     F: Field + PrimeField + ark_crypto_primitives::sponge::Absorb,
     C: CurveGroup<BaseField = F>,
@@ -22,7 +22,7 @@ where
         .map(|(i, _ct)| SortedRow::new_with_bucket(i as u16, N as u16, 0))
         .collect();
 
-    let mut prev: [SortedRow; N] = prev_vec
+    let prev: [SortedRow; N] = prev_vec
         .try_into()
         .expect("Initial array should have exactly N elements");
 
@@ -106,7 +106,7 @@ pub fn build_level<const N: usize>(
     let mut num_zeros = 0u16;
     let mut num_ones = 0u16;
 
-    for (i, (row, bit)) in rows_with_bits.iter().enumerate() {
+    for (_i, (row, bit)) in rows_with_bits.iter().enumerate() {
         let bucket = row.bucket;
 
         // Check if we're entering a new bucket
