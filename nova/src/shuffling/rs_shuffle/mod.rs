@@ -12,6 +12,7 @@ pub const LEVELS: usize = 5;
 /// Total number of split bits needed (N * LEVELS)
 pub const BITS_NEED: usize = N * LEVELS; // 260 split bits total
 
+pub mod bit_generation;
 pub mod circuit;
 pub mod data_structures;
 pub mod permutation;

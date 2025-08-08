@@ -1,5 +1,6 @@
 //! Witness generation for RS shuffle (prover-side logic)
 
+use super::bit_generation::derive_split_bits;
 use super::data_structures::*;
 use super::{LEVELS, N};
 use crate::shuffling::data_structures::ElGamalCiphertext;
@@ -7,13 +8,16 @@ use ark_ec::CurveGroup;
 use ark_ff::{Field, PrimeField};
 
 /// Main witness preparation function (prover-side)
-pub fn prepare_witness_data<F, C>(ct_init: &[ElGamalCiphertext<C>], _seed: &[u8]) -> WitnessData<N, LEVELS>
+pub fn prepare_witness_data<F, C>(
+    ct_init: &[ElGamalCiphertext<C>],
+    seed: F,
+) -> WitnessData<N, LEVELS>
 where
     F: Field + PrimeField + ark_crypto_primitives::sponge::Absorb,
     C: CurveGroup<BaseField = F>,
 {
-    // Derive split bits from seed
-    let bits_mat_vec = derive_split_bits::<F>(_seed);
+    // Derive split bits from seed - returns bits and number of samples used
+    let (bits_mat, _num_samples) = derive_split_bits::<F>(seed);
 
     // Initialize with level-0 rows (one bucket of full length)
     let prev_vec: Vec<SortedRow> = ct_init
@@ -29,14 +33,11 @@ where
     // Process all levels using scan to thread prev through each iteration
     let level_results: Vec<([UnsortedRow; N], [SortedRow; N])> = (0..LEVELS)
         .scan(prev, |prev_state, level| {
-            // Convert Vec<bool> to [bool; N]
-            let bits_level: [bool; N] = bits_mat_vec[level]
-                .clone()
-                .try_into()
-                .expect("Bits array should have exactly N elements");
+            // Get bits for this level directly from the array
+            let bits_level = &bits_mat[level];
 
             // Build level with current prev state
-            let (uns_array, nxt_array) = build_level::<N>(prev_state, &bits_level);
+            let (uns_array, nxt_array) = build_level::<N>(prev_state, bits_level);
 
             // Update prev state for next iteration
             *prev_state = nxt_array.clone();
@@ -50,14 +51,6 @@ where
     let uns_levels: [[UnsortedRow; N]; LEVELS] =
         std::array::from_fn(|i| level_results[i].0.clone());
     let next_levels: [[SortedRow; N]; LEVELS] = std::array::from_fn(|i| level_results[i].1.clone());
-
-    // Convert bits matrix using array::from_fn
-    let bits_mat: [[bool; N]; LEVELS] = std::array::from_fn(|i| {
-        bits_mat_vec[i]
-            .clone()
-            .try_into()
-            .expect("Bits array should have exactly N elements")
-    });
 
     WitnessData { bits_mat, uns_levels, next_levels }
 }
@@ -194,99 +187,6 @@ pub fn build_level<const N: usize>(
         .expect("Next array should have exactly N elements");
 
     (unsorted_array, next_array)
-}
-
-/// Derive split bits from random seed using Poseidon hash
-pub fn derive_split_bits<F: Field + PrimeField + ark_crypto_primitives::sponge::Absorb>(
-    seed: &[u8],
-) -> Vec<Vec<bool>> {
-    use crate::shuffling::utils::generate_random_values;
-    use ark_ff::BigInteger;
-
-    let mut bits_mat = Vec::new();
-
-    for level in 0..LEVELS {
-        // Create domain-separated seed for this level
-        // Convert seed bytes to field element with domain separation
-        let mut level_seed_bytes = Vec::new();
-        level_seed_bytes.extend_from_slice(b"rs_shuffle_level");
-        level_seed_bytes.extend_from_slice(&(level as u32).to_le_bytes());
-        level_seed_bytes.extend_from_slice(seed);
-
-        // Convert to field element (using a simple modular reduction)
-        let level_seed = F::from_le_bytes_mod_order(&level_seed_bytes);
-
-        // We need N bits total
-        // Each pair of random values will give us their combined bit decomposition
-        // minus the MSB from each
-        let mut level_bits = Vec::new();
-        let mut bits_collected = 0;
-
-        while bits_collected < N {
-            // Draw 2 random values from Poseidon
-            let random_values =
-                generate_random_values(level_seed + F::from(bits_collected as u64), 2);
-
-            // Decompose first value into bits
-            let value1_bigint = random_values[0].into_bigint();
-            let value1_bytes = value1_bigint.to_bytes_le();
-            let value1_bits = bytes_to_bits(&value1_bytes);
-
-            // Decompose second value into bits
-            let value2_bigint = random_values[1].into_bigint();
-            let value2_bytes = value2_bigint.to_bytes_le();
-            let value2_bits = bytes_to_bits(&value2_bytes);
-
-            // Find MSB position and discard it for both values
-            // MSB is the highest set bit position
-            let msb1_pos = find_msb_position(&value1_bits);
-            let msb2_pos = find_msb_position(&value2_bits);
-
-            // Collect bits from first value (excluding MSB)
-            for (i, &bit) in value1_bits.iter().enumerate() {
-                if i != msb1_pos && bits_collected < N {
-                    level_bits.push(bit);
-                    bits_collected += 1;
-                }
-            }
-
-            // Collect bits from second value (excluding MSB)
-            for (i, &bit) in value2_bits.iter().enumerate() {
-                if i != msb2_pos && bits_collected < N {
-                    level_bits.push(bit);
-                    bits_collected += 1;
-                }
-            }
-        }
-
-        // Ensure we have exactly N bits
-        level_bits.truncate(N);
-
-        bits_mat.push(level_bits);
-    }
-
-    bits_mat
-}
-
-/// Convert bytes to bit vector (LSB first)
-fn bytes_to_bits(bytes: &[u8]) -> Vec<bool> {
-    let mut bits = Vec::new();
-    for byte in bytes {
-        for i in 0..8 {
-            bits.push((byte >> i) & 1 == 1);
-        }
-    }
-    bits
-}
-
-/// Find the position of the most significant bit (highest set bit)
-fn find_msb_position(bits: &[bool]) -> usize {
-    for (i, &bit) in bits.iter().enumerate().rev() {
-        if bit {
-            return i;
-        }
-    }
-    0 // If no bits are set, return 0
 }
 
 #[cfg(test)]
