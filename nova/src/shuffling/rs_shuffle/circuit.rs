@@ -1,6 +1,6 @@
 //! Main circuit implementation for RS shuffle with constraint generation
 
-use super::data_structures::{UnsortedRowVar, WitnessData, WitnessDataVar};
+use super::data_structures::{SortedRowVar, UnsortedRowVar, WitnessData, WitnessDataVar};
 use super::permutation::{check_grand_product, IndexPositionPair, IndexedElGamalCiphertext};
 use super::{LEVELS, N};
 use crate::shuffling::data_structures::{ElGamalCiphertext, ElGamalCiphertextVar};
@@ -26,9 +26,6 @@ where
 {
     /// Public: Initial ciphertexts
     pub ct_init_pub: Vec<ElGamalCiphertext<C>>,
-    /// Public: Random seed for deriving split bits
-    pub seed_pub: F,
-
     /// Private: Witness data for all levels
     pub witness: WitnessData<N, LEVELS>,
     /// Public: Fiat-Shamir challenges (same for all levels)
@@ -46,14 +43,12 @@ where
     pub fn new(
         ct_init: Vec<ElGamalCiphertext<C>>,
         ct_after_shuffle: Vec<ElGamalCiphertext<C>>,
-        seed: F,
         witness: WitnessData<N, LEVELS>,
         alpha: F,
         beta: F,
     ) -> Self {
         Self {
             ct_init_pub: ct_init,
-            seed_pub: seed,
             witness,
             alpha,
             beta,
@@ -77,8 +72,15 @@ where
         self,
         cs: ConstraintSystemRef<G::BaseField>,
     ) -> Result<(), SynthesisError> {
-        // 1. Allocate public inputs
-        let _ct_init_vars: Vec<ElGamalCiphertextVar<G>> = self
+        // 1. Allocate witness data FIRST - this contains the permutation information
+        let witness_var = WitnessDataVar::<G::BaseField, N, LEVELS>::new_variable(
+            cs.clone(),
+            || Ok(&self.witness),
+            AllocationMode::Witness,
+        )?;
+
+        // 2. Allocate the ElGamal ciphertexts as public inputs
+        let ct_init_vars: Vec<ElGamalCiphertextVar<G>> = self
             .ct_init_pub
             .iter()
             .map(|ct| {
@@ -90,61 +92,71 @@ where
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        // Allocate the final shuffled ciphertexts as indexed ciphertexts with their positions
-        let _ciphertexts_final: Vec<IndexedElGamalCiphertext<G>> = self
+        let ct_final_vars: Vec<ElGamalCiphertextVar<G>> = self
             .ct_after_shuffle
             .iter()
-            .enumerate()
-            .map(|(i, ct)| {
-                let ct_var = ElGamalCiphertextVar::<G>::new_variable(
+            .map(|ct| {
+                ElGamalCiphertextVar::<G>::new_variable(
                     cs.clone(),
                     || Ok(ct),
                     AllocationMode::Input,
-                )?;
-                let idx_var = FpVar::new_constant(cs.clone(), G::BaseField::from(i as u64))?;
-                Ok(IndexedElGamalCiphertext::new(idx_var, ct_var))
+                )
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        // 2. Allocate witness data using AllocVar
-        let witness_var = WitnessDataVar::<G::BaseField, N, LEVELS>::new_variable(
-            cs.clone(),
-            || Ok(&self.witness),
-            AllocationMode::Witness,
-        )?;
+        // 3. Create indexed ciphertexts by zipping witness indices with ciphertexts
+        // Initial: Use indices from first level unsorted array
+        let ciphertexts_initial: Vec<IndexedElGamalCiphertext<G>> = witness_var.uns_levels[0]
+            .iter()
+            .zip(ct_init_vars.into_iter())
+            .map(|(row, ct)| IndexedElGamalCiphertext::new(row.idx.clone(), ct))
+            .collect();
 
-        // 3. Allocate challenges
+        // Final: Use indices from last level sorted array
+        let ciphertexts_final: Vec<IndexedElGamalCiphertext<G>> = witness_var.sorted_levels
+            [LEVELS - 1]
+            .iter()
+            .zip(ct_final_vars.into_iter())
+            .map(|(row, ct)| IndexedElGamalCiphertext::new(row.idx.clone(), ct))
+            .collect();
+
+        // 4. Allocate challenges
         let alpha_var = FpVar::new_variable(cs.clone(), || Ok(self.alpha), AllocationMode::Input)?;
         let beta_var = FpVar::new_variable(cs.clone(), || Ok(self.beta), AllocationMode::Input)?;
 
         // Compute other challenges as powers of beta
-        let beta_2_var = &beta_var * &beta_var; // beta^2 (was gamma)
-        let beta_3_var = &beta_2_var * &beta_var; // beta^3 (was delta)
-        let beta_4_var = &beta_3_var * &beta_var; // beta^4 (was epsilon)
-        let beta_5_var = &beta_4_var * &beta_var; // beta^5 (was zeta)
-        let _beta_6_var = &beta_5_var * &beta_var; // beta^6 (was eta)
+        let beta_2_var = &beta_var * &beta_var; // beta^2 (for c1.x)
+        let beta_3_var = &beta_2_var * &beta_var; // beta^3 (for c1.y)
+        let beta_4_var = &beta_3_var * &beta_var; // beta^4 (for c1.z)
+        let beta_5_var = &beta_4_var * &beta_var; // beta^5 (for c2.x)
+        let beta_6_var = &beta_5_var * &beta_var; // beta^6 (for c2.y)
 
-        // 4. Level-by-level verification
+        // 5. Level-by-level verification
         for level in 0..LEVELS {
             let unsorted = &witness_var.uns_levels[level];
-            let next_arr = &witness_var.next_levels[level];
+            let sorted_arr = &witness_var.sorted_levels[level];
 
             // Verify this shuffle level (row constraints + permutation check)
-            verify_shuffle_level::<_, N>(cs.clone(), unsorted, next_arr, &alpha_var, &beta_var)?;
+            verify_shuffle_level::<_, N>(cs.clone(), unsorted, sorted_arr, &alpha_var, &beta_var)?;
         }
 
-        // // 5. Final permutation check using ElGamal ciphertexts (7 challenges)
-        // // Note: ciphertexts_final was already allocated above as IndexedElGamalCiphertext
-
-        // // Check that the multisets are equal using 7 challenges for full ElGamal comparison
-        // check_grand_product::<G::BaseField, IndexedElGamalCiphertext<G>, 7>(
-        //     cs,
-        //     &ciphertexts_final,
-        //     &ciphertexts_initial,
-        //     &[
-        //         alpha_var, beta_var, beta_2_var, beta_3_var, beta_4_var, beta_5_var, beta_6_var,
-        //     ],
-        // )?;
+        // 6. Final permutation check using ElGamal ciphertexts (7 challenges)
+        // This verifies that initial and final ciphertexts form the same multiset
+        // The 7 challenges are: 1 for index + 6 for ElGamal components (c1.x, c1.y, c1.z, c2.x, c2.y, c2.z)
+        check_grand_product::<G::BaseField, IndexedElGamalCiphertext<G>, 7>(
+            cs,
+            &ciphertexts_initial,
+            &ciphertexts_final,
+            &[
+                alpha_var,  // For index
+                beta_var,   // For c1.x
+                beta_2_var, // For c1.y
+                beta_3_var, // For c1.z
+                beta_4_var, // For c2.x
+                beta_5_var, // For c2.y
+                beta_6_var, // For c2.z
+            ],
+        )?;
 
         Ok(())
     }
@@ -330,8 +342,8 @@ where
 /// - `Err(SynthesisError)` if any constraint fails
 pub fn verify_shuffle_level<F, const N: usize>(
     cs: ConstraintSystemRef<F>,
-    unsorted: &[UnsortedRowVar<F>; N],
-    next_arr: &[super::data_structures::SortedRowVar<F>; N],
+    unsorted_arr: &[UnsortedRowVar<F>; N],
+    sorted_arr: &[SortedRowVar<F>; N],
     alpha: &FpVar<F>,
     beta: &FpVar<F>,
 ) -> Result<(), SynthesisError>
@@ -339,10 +351,10 @@ where
     F: PrimeField,
 {
     // Step 1: Verify row-local constraints
-    let idx_next_pos_pairs = verify_row_constraints::<_, N>(cs.clone(), unsorted)?;
+    let idx_next_pos_pairs = verify_row_constraints::<_, N>(cs.clone(), unsorted_arr)?;
 
     // Step 2: Build right-side pairs (idx, pos) from next array
-    let idx_pos_pairs: Vec<IndexPositionPair<F>> = next_arr
+    let idx_pos_pairs: Vec<IndexPositionPair<F>> = sorted_arr
         .iter()
         .enumerate()
         .map(|(j, nr)| {

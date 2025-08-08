@@ -176,7 +176,7 @@ pub struct WitnessDataVar<F: PrimeField, const N: usize, const LEVELS: usize> {
     /// Unsorted witness rows per level
     pub uns_levels: [[UnsortedRowVar<F>; N]; LEVELS],
     /// Next-array per level
-    pub next_levels: [[SortedRowVar<F>; N]; LEVELS],
+    pub sorted_levels: [[SortedRowVar<F>; N]; LEVELS],
 }
 
 impl<F: PrimeField, const N: usize, const LEVELS: usize> AllocVar<WitnessData<N, LEVELS>, F>
@@ -262,7 +262,11 @@ impl<F: PrimeField, const N: usize, const LEVELS: usize> AllocVar<WitnessData<N,
             .try_into()
             .map_err(|_| SynthesisError::Unsatisfiable)?;
 
-        Ok(Self { bits_mat, uns_levels, next_levels })
+        Ok(Self {
+            bits_mat,
+            uns_levels,
+            sorted_levels: next_levels,
+        })
     }
 }
 
