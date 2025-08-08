@@ -1,5 +1,5 @@
 use ark_ff::PrimeField;
-use ark_r1cs_std::{fields::fp::FpVar, prelude::*};
+use ark_r1cs_std::{boolean::Boolean, fields::fp::FpVar, prelude::*};
 use ark_relations::{r1cs, r1cs::SynthesisError};
 use std::borrow::Borrow;
 
@@ -88,7 +88,7 @@ impl SortedRow {
 #[derive(Clone)]
 pub struct UnsortedRowVar<F: PrimeField> {
     /// Split bit (0 or 1)
-    pub bit: FpVar<F>,
+    pub bit: Boolean<F>,
     /// Number of zeros seen before this row in its bucket
     pub num_zeros: FpVar<F>,
     /// Number of ones seen before this row in its bucket
@@ -116,7 +116,7 @@ impl<F: PrimeField> AllocVar<UnsortedRow, F> for UnsortedRowVar<F> {
         let row = value.borrow();
 
         Ok(Self {
-            bit: FpVar::new_variable(cs.clone(), || Ok(F::from(row.bit as u64)), mode)?,
+            bit: Boolean::new_variable(cs.clone(), || Ok(row.bit), mode)?,
             num_zeros: FpVar::new_variable(cs.clone(), || Ok(F::from(row.num_zeros as u64)), mode)?,
             num_ones: FpVar::new_variable(cs.clone(), || Ok(F::from(row.num_ones as u64)), mode)?,
             total_zeros_in_bucket: FpVar::new_variable(
@@ -172,7 +172,7 @@ impl<F: PrimeField> AllocVar<SortedRow, F> for SortedRowVar<F> {
 #[derive(Clone)]
 pub struct WitnessDataVar<F: PrimeField, const N: usize, const LEVELS: usize> {
     /// Split bits matrix (LEVELS × N) as witness variables
-    pub bits_mat: [[FpVar<F>; N]; LEVELS],
+    pub bits_mat: [[Boolean<F>; N]; LEVELS],
     /// Unsorted witness rows per level
     pub uns_levels: [[UnsortedRowVar<F>; N]; LEVELS],
     /// Next-array per level
@@ -192,11 +192,10 @@ impl<F: PrimeField, const N: usize, const LEVELS: usize> AllocVar<WitnessData<N,
         let witness_data = value.borrow();
 
         // Helper to allocate a single bit
-        let alloc_bit =
-            |bit: &bool| FpVar::new_variable(cs.clone(), || Ok(F::from(*bit as u64)), mode);
+        let alloc_bit = |bit: &bool| Boolean::new_variable(cs.clone(), || Ok(*bit), mode);
 
         // Helper to allocate a level of bits
-        let alloc_bit_level = |level: &[bool; N]| -> Result<[FpVar<F>; N], SynthesisError> {
+        let alloc_bit_level = |level: &[bool; N]| -> Result<[Boolean<F>; N], SynthesisError> {
             level
                 .iter()
                 .map(alloc_bit)

@@ -146,13 +146,24 @@ where
 }
 
 // Circuit representation of ElGamal ciphertext
-#[derive(Clone)]
 pub struct ElGamalCiphertextVar<G: SWCurveConfig>
 where
     G::BaseField: PrimeField,
 {
     pub c1: ProjectiveVar<G, FpVar<G::BaseField>>,
     pub c2: ProjectiveVar<G, FpVar<G::BaseField>>,
+}
+
+impl<G: SWCurveConfig> Clone for ElGamalCiphertextVar<G>
+where
+    G::BaseField: PrimeField,
+{
+    fn clone(&self) -> Self {
+        Self {
+            c1: self.c1.clone(),
+            c2: self.c2.clone(),
+        }
+    }
 }
 
 impl<G: SWCurveConfig> ElGamalCiphertextVar<G>

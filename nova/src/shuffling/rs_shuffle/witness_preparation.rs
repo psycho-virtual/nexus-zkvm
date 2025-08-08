@@ -1,29 +1,25 @@
 //! Witness generation for RS shuffle (prover-side logic)
 
-use super::bit_generation::derive_split_bits;
+use super::bit_generation::{derive_split_bits, derive_split_bits_circuit};
 use super::data_structures::*;
 use super::{LEVELS, N};
-use crate::shuffling::data_structures::ElGamalCiphertext;
-use ark_ec::CurveGroup;
+use ark_crypto_primitives::sponge::Absorb;
 use ark_ff::{Field, PrimeField};
+use ark_r1cs_std::alloc::AllocVar;
+use ark_r1cs_std::fields::fp::FpVar;
+use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
 
 /// Main witness preparation function (prover-side)
-pub fn prepare_witness_data<F, C>(
-    ct_init: &[ElGamalCiphertext<C>],
-    seed: F,
-) -> WitnessData<N, LEVELS>
+pub fn prepare_witness_data<F>(seed: F) -> (WitnessData<N, LEVELS>, usize)
 where
-    F: Field + PrimeField + ark_crypto_primitives::sponge::Absorb,
-    C: CurveGroup<BaseField = F>,
+    F: Field + PrimeField + Absorb,
 {
     // Derive split bits from seed - returns bits and number of samples used
-    let (bits_mat, _num_samples) = derive_split_bits::<F>(seed);
+    let (bits_mat, num_samples) = derive_split_bits::<F>(seed);
 
     // Initialize with level-0 rows (one bucket of full length)
-    let prev_vec: Vec<SortedRow> = ct_init
-        .iter()
-        .enumerate()
-        .map(|(i, _ct)| SortedRow::new_with_bucket(i as u16, N as u16, 0))
+    let prev_vec: Vec<SortedRow> = (0..N)
+        .map(|i| SortedRow::new_with_bucket(i as u16, N as u16, 0))
         .collect();
 
     let prev: [SortedRow; N] = prev_vec
@@ -52,7 +48,10 @@ where
         std::array::from_fn(|i| level_results[i].0.clone());
     let next_levels: [[SortedRow; N]; LEVELS] = std::array::from_fn(|i| level_results[i].1.clone());
 
-    WitnessData { bits_mat, uns_levels, next_levels }
+    (
+        WitnessData { bits_mat, uns_levels, next_levels },
+        num_samples,
+    )
 }
 
 /// Build witness tables for one level using functional approach
@@ -187,6 +186,82 @@ pub fn build_level<const N: usize>(
         .expect("Next array should have exactly N elements");
 
     (unsorted_array, next_array)
+}
+
+/// SNARK circuit version of witness preparation
+///
+/// This function creates a circuit-compatible witness data structure by:
+/// 1. Using `derive_split_bits_circuit` to generate bits from the seed
+/// 2. Allocating witness data fields as witness variables
+/// 3. Replacing the bit field in unsorted rows with bits from the circuit
+///
+/// # Parameters
+/// - `cs`: The constraint system reference
+/// - `seed`: The seed as a circuit variable (FpVar)
+/// - `witness_data`: The witness data computed natively (used as advice)
+/// - `num_samples`: Number of Poseidon hash samples needed
+///
+/// # Returns
+/// - `Result<WitnessDataVar<F, N, LEVELS>, SynthesisError>` - The circuit witness data
+pub fn prepare_witness_data_circuit<F>(
+    cs: ConstraintSystemRef<F>,
+    seed: &FpVar<F>,
+    witness_data: &WitnessData<N, LEVELS>,
+    num_samples: usize,
+) -> Result<WitnessDataVar<F, N, LEVELS>, SynthesisError>
+where
+    F: PrimeField + Absorb,
+{
+    // 1. Generate bits from seed using the circuit version
+    let bits_mat = derive_split_bits_circuit(cs.clone(), seed, num_samples)?;
+
+    // 2. Allocate unsorted rows without the bit field (we'll use bits from derive_split_bits_circuit)
+    let uns_levels: [[UnsortedRowVar<F>; N]; LEVELS] = std::array::from_fn(|level| {
+        std::array::from_fn(|i| {
+            let row = &witness_data.uns_levels[level][i];
+
+            // Allocate all fields except bit (which comes from derive_split_bits_circuit)
+            UnsortedRowVar {
+                bit: bits_mat[level][i].clone(), // Use bit from circuit generation
+                num_zeros: FpVar::new_witness(cs.clone(), || Ok(F::from(row.num_zeros as u64)))
+                    .expect("Failed to allocate num_zeros"),
+                num_ones: FpVar::new_witness(cs.clone(), || Ok(F::from(row.num_ones as u64)))
+                    .expect("Failed to allocate num_ones"),
+                total_zeros_in_bucket: FpVar::new_witness(cs.clone(), || {
+                    Ok(F::from(row.num_zeros_in_bucket as u64))
+                })
+                .expect("Failed to allocate total_zeros_in_bucket"),
+                bucket_length: FpVar::new_witness(cs.clone(), || {
+                    Ok(F::from(row.bucket_length as u64))
+                })
+                .expect("Failed to allocate bucket_length"),
+                idx: FpVar::new_witness(cs.clone(), || Ok(F::from(row.idx as u64)))
+                    .expect("Failed to allocate idx"),
+                next_pos: FpVar::new_witness(cs.clone(), || Ok(F::from(row.next_pos as u64)))
+                    .expect("Failed to allocate next_pos"),
+                bucket_id: FpVar::new_witness(cs.clone(), || Ok(F::from(row.bucket_id as u64)))
+                    .expect("Failed to allocate bucket_id"),
+            }
+        })
+    });
+
+    // 3. Allocate sorted rows (all fields are witness variables)
+    let sorted_levels: [[SortedRowVar<F>; N]; LEVELS] = std::array::from_fn(|level| {
+        std::array::from_fn(|i| {
+            let row = &witness_data.next_levels[level][i];
+
+            SortedRowVar {
+                idx: FpVar::new_witness(cs.clone(), || Ok(F::from(row.idx as u64)))
+                    .expect("Failed to allocate sorted idx"),
+                length: FpVar::new_witness(cs.clone(), || Ok(F::from(row.length as u64)))
+                    .expect("Failed to allocate sorted length"),
+                bucket: FpVar::new_witness(cs.clone(), || Ok(F::from(row.bucket as u64)))
+                    .expect("Failed to allocate sorted bucket"),
+            }
+        })
+    });
+
+    Ok(WitnessDataVar { bits_mat, uns_levels, sorted_levels })
 }
 
 #[cfg(test)]

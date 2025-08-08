@@ -18,6 +18,15 @@ pub mod data_structures;
 pub mod permutation;
 pub mod witness_preparation;
 
-pub use circuit::{verify_row_constraints, RSShuffleCircuit};
-pub use data_structures::{SortedRow, UnsortedRow, WitnessData};
-pub use witness_preparation::prepare_witness_data;
+// Main verification function
+pub use circuit::{rs_shuffle, verify_row_constraints, verify_shuffle_level};
+
+// Data structures
+pub use data_structures::{SortedRow, SortedRowVar, UnsortedRow, UnsortedRowVar, WitnessData, WitnessDataVar};
+
+// Witness preparation
+pub use witness_preparation::{prepare_witness_data, prepare_witness_data_circuit};
+
+// Legacy circuit (deprecated)
+#[allow(deprecated)]
+pub use circuit::RSShuffleCircuit;

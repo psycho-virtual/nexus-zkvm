@@ -1,4 +1,4 @@
-//! Main circuit implementation for RS shuffle with constraint generation
+//! RS shuffle verification functions for SNARK circuits
 
 use super::data_structures::{SortedRowVar, UnsortedRowVar, WitnessData, WitnessDataVar};
 use super::permutation::{check_grand_product, IndexPositionPair, IndexedElGamalCiphertext};
@@ -18,51 +18,109 @@ use ark_r1cs_std::{fields::fp::FpVar, prelude::*};
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
 use std::ops::Not;
 
-/// Main RS Shuffle Circuit
+/// Verify RS shuffle constraints in a SNARK circuit
+///
+/// This function verifies that a shuffle was performed correctly by:
+/// 1. Checking row-local constraints at each level
+/// 2. Verifying permutation consistency at each level
+/// 3. Ensuring ElGamal ciphertexts are preserved through the shuffle
+///
+/// # Type Parameters
+/// - `G`: The elliptic curve configuration
+/// - `N`: The number of elements being shuffled
+/// - `LEVELS`: The number of levels in the shuffle
+///
+/// # Parameters
+/// - `cs`: The constraint system reference
+/// - `ct_init_pub`: Initial ElGamal ciphertexts (as SNARK variables)
+/// - `ct_after_shuffle`: Final shuffled ElGamal ciphertexts (as SNARK variables)
+/// - `witness`: The witness data containing the shuffle permutation (as SNARK variable)
+/// - `alpha`: First Fiat-Shamir challenge (as SNARK variable)
+/// - `beta`: Second Fiat-Shamir challenge (as SNARK variable)
+///
+/// # Returns
+/// - `Ok(())` if all shuffle constraints are satisfied
+/// - `Err(SynthesisError)` if any constraint fails
+pub fn rs_shuffle<G, const N: usize, const LEVELS: usize>(
+    cs: ConstraintSystemRef<G::BaseField>,
+    ct_init_pub: &[ElGamalCiphertextVar<G>],
+    ct_after_shuffle: &[ElGamalCiphertextVar<G>],
+    witness: &WitnessDataVar<G::BaseField, N, LEVELS>,
+    alpha: &FpVar<G::BaseField>,
+    beta: &FpVar<G::BaseField>,
+) -> Result<(), SynthesisError>
+where
+    G: SWCurveConfig,
+    G::BaseField: PrimeField,
+{
+    // 1. Create indexed ciphertexts by zipping witness indices with ciphertexts
+    // Initial: Use indices from first level unsorted array
+    let ciphertexts_initial: Vec<IndexedElGamalCiphertext<G>> = witness.uns_levels[0]
+        .iter()
+        .zip(ct_init_pub.iter())
+        .map(|(row, ct)| IndexedElGamalCiphertext::new(row.idx.clone(), ct.clone()))
+        .collect();
+
+    // Final: Use indices from last level sorted array
+    let ciphertexts_final: Vec<IndexedElGamalCiphertext<G>> = witness.sorted_levels[LEVELS - 1]
+        .iter()
+        .zip(ct_after_shuffle.iter())
+        .map(|(row, ct)| IndexedElGamalCiphertext::new(row.idx.clone(), ct.clone()))
+        .collect();
+
+    // 2. Compute other challenges as powers of beta
+    let beta_2 = beta * beta; // beta^2 (for c1.x)
+    let beta_3 = &beta_2 * beta; // beta^3 (for c1.y)
+    let beta_4 = &beta_3 * beta; // beta^4 (for c1.z)
+    let beta_5 = &beta_4 * beta; // beta^5 (for c2.x)
+    let beta_6 = &beta_5 * beta; // beta^6 (for c2.y)
+
+    // 3. Level-by-level verification
+    for level in 0..LEVELS {
+        let unsorted = &witness.uns_levels[level];
+        let sorted_arr = &witness.sorted_levels[level];
+
+        // Verify this shuffle level (row constraints + permutation check)
+        verify_shuffle_level::<_, N>(cs.clone(), unsorted, sorted_arr, alpha, beta)?;
+    }
+
+    // 4. Final permutation check using ElGamal ciphertexts (7 challenges)
+    // This verifies that initial and final ciphertexts form the same multiset
+    // The 7 challenges are: 1 for index + 6 for ElGamal components (c1.x, c1.y, c1.z, c2.x, c2.y, c2.z)
+    check_grand_product::<G::BaseField, IndexedElGamalCiphertext<G>, 7>(
+        cs,
+        &ciphertexts_initial,
+        &ciphertexts_final,
+        &[
+            alpha.clone(), // For index
+            beta.clone(),  // For c1.x
+            beta_2,        // For c1.y
+            beta_3,        // For c1.z
+            beta_4,        // For c2.x
+            beta_5,        // For c2.y
+            beta_6,        // For c2.z
+        ],
+    )?;
+
+    Ok(())
+}
+
+// Legacy circuit wrapper - can be removed if not needed
+/// RS Shuffle Circuit (deprecated - use rs_shuffle function instead)
+#[deprecated(note = "Use rs_shuffle function directly with SNARK variables")]
 pub struct RSShuffleCircuit<F, C>
 where
     F: PrimeField,
     C: CurveGroup<BaseField = F>,
 {
-    /// Public: Initial ciphertexts
     pub ct_init_pub: Vec<ElGamalCiphertext<C>>,
-    /// Private: Witness data for all levels
     pub witness: WitnessData<N, LEVELS>,
-    /// Public: Fiat-Shamir challenges (same for all levels)
     pub alpha: F,
-    pub beta: F, // beta_2 through beta_6 are computed as powers of beta
+    pub beta: F,
     pub ct_after_shuffle: Vec<ElGamalCiphertext<C>>,
 }
 
-impl<F, C> RSShuffleCircuit<F, C>
-where
-    F: PrimeField,
-    C: CurveGroup<BaseField = F>,
-{
-    /// Create a new RS shuffle circuit
-    pub fn new(
-        ct_init: Vec<ElGamalCiphertext<C>>,
-        ct_after_shuffle: Vec<ElGamalCiphertext<C>>,
-        witness: WitnessData<N, LEVELS>,
-        alpha: F,
-        beta: F,
-    ) -> Self {
-        Self {
-            ct_init_pub: ct_init,
-            witness,
-            alpha,
-            beta,
-            ct_after_shuffle,
-        }
-    }
-
-    /// Derive Fiat-Shamir challenges from seed
-    pub fn derive_challenges(_seed: &[u8]) -> (F, F) {
-        // TODO: Implement actual Fiat-Shamir derivation using Poseidon
-        (F::from(2u64), F::from(3u64)) // alpha, beta
-    }
-}
-
+#[allow(deprecated)]
 impl<G> ConstraintSynthesizer<G::BaseField> for RSShuffleCircuit<G::BaseField, Projective<G>>
 where
     G: SWCurveConfig,
@@ -72,14 +130,14 @@ where
         self,
         cs: ConstraintSystemRef<G::BaseField>,
     ) -> Result<(), SynthesisError> {
-        // 1. Allocate witness data FIRST - this contains the permutation information
+        // Allocate witness data
         let witness_var = WitnessDataVar::<G::BaseField, N, LEVELS>::new_variable(
             cs.clone(),
             || Ok(&self.witness),
             AllocationMode::Witness,
         )?;
 
-        // 2. Allocate the ElGamal ciphertexts as public inputs
+        // Allocate ElGamal ciphertexts
         let ct_init_vars: Vec<ElGamalCiphertextVar<G>> = self
             .ct_init_pub
             .iter()
@@ -104,61 +162,19 @@ where
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        // 3. Create indexed ciphertexts by zipping witness indices with ciphertexts
-        // Initial: Use indices from first level unsorted array
-        let ciphertexts_initial: Vec<IndexedElGamalCiphertext<G>> = witness_var.uns_levels[0]
-            .iter()
-            .zip(ct_init_vars.into_iter())
-            .map(|(row, ct)| IndexedElGamalCiphertext::new(row.idx.clone(), ct))
-            .collect();
-
-        // Final: Use indices from last level sorted array
-        let ciphertexts_final: Vec<IndexedElGamalCiphertext<G>> = witness_var.sorted_levels
-            [LEVELS - 1]
-            .iter()
-            .zip(ct_final_vars.into_iter())
-            .map(|(row, ct)| IndexedElGamalCiphertext::new(row.idx.clone(), ct))
-            .collect();
-
-        // 4. Allocate challenges
+        // Allocate challenges
         let alpha_var = FpVar::new_variable(cs.clone(), || Ok(self.alpha), AllocationMode::Input)?;
         let beta_var = FpVar::new_variable(cs.clone(), || Ok(self.beta), AllocationMode::Input)?;
 
-        // Compute other challenges as powers of beta
-        let beta_2_var = &beta_var * &beta_var; // beta^2 (for c1.x)
-        let beta_3_var = &beta_2_var * &beta_var; // beta^3 (for c1.y)
-        let beta_4_var = &beta_3_var * &beta_var; // beta^4 (for c1.z)
-        let beta_5_var = &beta_4_var * &beta_var; // beta^5 (for c2.x)
-        let beta_6_var = &beta_5_var * &beta_var; // beta^6 (for c2.y)
-
-        // 5. Level-by-level verification
-        for level in 0..LEVELS {
-            let unsorted = &witness_var.uns_levels[level];
-            let sorted_arr = &witness_var.sorted_levels[level];
-
-            // Verify this shuffle level (row constraints + permutation check)
-            verify_shuffle_level::<_, N>(cs.clone(), unsorted, sorted_arr, &alpha_var, &beta_var)?;
-        }
-
-        // 6. Final permutation check using ElGamal ciphertexts (7 challenges)
-        // This verifies that initial and final ciphertexts form the same multiset
-        // The 7 challenges are: 1 for index + 6 for ElGamal components (c1.x, c1.y, c1.z, c2.x, c2.y, c2.z)
-        check_grand_product::<G::BaseField, IndexedElGamalCiphertext<G>, 7>(
+        // Call the main verification function
+        rs_shuffle::<G, N, LEVELS>(
             cs,
-            &ciphertexts_initial,
-            &ciphertexts_final,
-            &[
-                alpha_var,  // For index
-                beta_var,   // For c1.x
-                beta_2_var, // For c1.y
-                beta_3_var, // For c1.z
-                beta_4_var, // For c2.x
-                beta_5_var, // For c2.y
-                beta_6_var, // For c2.z
-            ],
-        )?;
-
-        Ok(())
+            &ct_init_vars,
+            &ct_final_vars,
+            &witness_var,
+            &alpha_var,
+            &beta_var,
+        )
     }
 }
 
@@ -182,17 +198,15 @@ where
 
         // ============================================================
         // Row-Local Constraint (1): BITNESS
-        // Mathematical requirement: b_i * (b_i - 1) = 0
-        // This ensures b_i ∈ {0, 1}
+        // Since we're using Boolean<F>, this constraint is automatically enforced
+        // Boolean<F> guarantees b_i ∈ {0, 1}
         // ============================================================
         let one = FpVar::<F>::one();
         let zero = FpVar::<F>::zero();
-        let bit = &u.bit.clone();
-        let one_minus_bit = &one - bit;
 
-        // b_i * (b_i - 1) = 0
-        let bitness_check = bit * &one_minus_bit;
-        bitness_check.enforce_equal(&zero)?;
+        // Convert Boolean to FpVar for arithmetic operations
+        let bit_as_fp: FpVar<F> = u.bit.clone().into();
+        let one_minus_bit = &one - &bit_as_fp;
 
         // ============================================================
         // Row-Local Constraint (2): PREFIX-COUNTER EVOLUTION
@@ -234,7 +248,7 @@ where
 
             // same_bucket * (o_{i+1} - o_i - b_i) = 0
             // When same_bucket is true: enforce o_{i+1} = o_i + b_i
-            let expected_next_ones = &u.num_ones + &u.bit;
+            let expected_next_ones = &u.num_ones + &bit_as_fp;
             let selected_ones = same_bucket.select(&expected_next_ones, &next.num_ones)?;
             next.num_ones.enforce_equal(&selected_ones)?;
 
@@ -278,7 +292,8 @@ where
 
         // last_i * ((L_i - Z_i) - o_i - b_i) = 0
         // When is_last_in_bucket is true: enforce o_i = (L_i - Z_i) - b_i
-        let expected_final_ones = &u.bucket_length - &u.total_zeros_in_bucket - &u.bit;
+        let bit_as_fp: FpVar<F> = u.bit.clone().into();
+        let expected_final_ones = &u.bucket_length - &u.total_zeros_in_bucket - &bit_as_fp;
         let selected_final_ones = is_last_in_bucket.select(&expected_final_ones, &u.num_ones)?;
         u.num_ones.enforce_equal(&selected_final_ones)?;
 
@@ -306,7 +321,7 @@ where
 
         // Compute offset: z_i + b_i * (Z_i - z_i + o_i)
         let offset =
-            &u.num_zeros + &u.bit * (&u.total_zeros_in_bucket - &u.num_zeros + &u.num_ones);
+            &u.num_zeros + &bit_as_fp * (&u.total_zeros_in_bucket - &u.num_zeros + &u.num_ones);
         let expected_dest = base + offset;
 
         // Enforce: next_pos_i = expected_dest
