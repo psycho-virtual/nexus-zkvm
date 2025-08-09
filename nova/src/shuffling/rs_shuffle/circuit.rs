@@ -4,6 +4,7 @@ use super::data_structures::{SortedRowVar, UnsortedRowVar, WitnessData, WitnessD
 use super::permutation::{check_grand_product, IndexPositionPair, IndexedElGamalCiphertext};
 use super::{LEVELS, N};
 use crate::shuffling::data_structures::{ElGamalCiphertext, ElGamalCiphertextVar};
+use crate::track_constraints;
 use ark_ec::{
     short_weierstrass::{Projective, SWCurveConfig},
     CurveGroup,
@@ -17,6 +18,8 @@ use ark_r1cs_std::{
 use ark_r1cs_std::{fields::fp::FpVar, prelude::*};
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
 use std::ops::Not;
+
+const LOG_TARGET: &str = "rs_shuffle::circuit";
 
 /// Verify RS shuffle constraints in a SNARK circuit
 ///
@@ -53,56 +56,58 @@ where
     G: SWCurveConfig,
     G::BaseField: PrimeField,
 {
-    // 1. Create indexed ciphertexts by zipping witness indices with ciphertexts
-    // Initial: Use indices from first level unsorted array
-    let ciphertexts_initial: Vec<IndexedElGamalCiphertext<G>> = witness.uns_levels[0]
-        .iter()
-        .zip(ct_init_pub.iter())
-        .map(|(row, ct)| IndexedElGamalCiphertext::new(row.idx.clone(), ct.clone()))
-        .collect();
+    track_constraints!(&cs, "rs shuffle", LOG_TARGET, {
+        // 1. Create indexed ciphertexts by zipping witness indices with ciphertexts
+        // Initial: Use indices from first level unsorted array
+        let ciphertexts_initial: Vec<IndexedElGamalCiphertext<G>> = witness.uns_levels[0]
+            .iter()
+            .zip(ct_init_pub.iter())
+            .map(|(row, ct)| IndexedElGamalCiphertext::new(row.idx.clone(), ct.clone()))
+            .collect();
 
-    // Final: Use indices from last level sorted array
-    let ciphertexts_final: Vec<IndexedElGamalCiphertext<G>> = witness.sorted_levels[LEVELS - 1]
-        .iter()
-        .zip(ct_after_shuffle.iter())
-        .map(|(row, ct)| IndexedElGamalCiphertext::new(row.idx.clone(), ct.clone()))
-        .collect();
+        // Final: Use indices from last level sorted array
+        let ciphertexts_final: Vec<IndexedElGamalCiphertext<G>> = witness.sorted_levels[LEVELS - 1]
+            .iter()
+            .zip(ct_after_shuffle.iter())
+            .map(|(row, ct)| IndexedElGamalCiphertext::new(row.idx.clone(), ct.clone()))
+            .collect();
 
-    // 2. Compute other challenges as powers of beta
-    let beta_2 = beta * beta; // beta^2 (for c1.x)
-    let beta_3 = &beta_2 * beta; // beta^3 (for c1.y)
-    let beta_4 = &beta_3 * beta; // beta^4 (for c1.z)
-    let beta_5 = &beta_4 * beta; // beta^5 (for c2.x)
-    let beta_6 = &beta_5 * beta; // beta^6 (for c2.y)
+        // 2. Compute other challenges as powers of beta
+        let beta_2 = beta * beta; // beta^2 (for c1.x)
+        let beta_3 = &beta_2 * beta; // beta^3 (for c1.y)
+        let beta_4 = &beta_3 * beta; // beta^4 (for c1.z)
+        let beta_5 = &beta_4 * beta; // beta^5 (for c2.x)
+        let beta_6 = &beta_5 * beta; // beta^6 (for c2.y)
 
-    // 3. Level-by-level verification
-    for level in 0..LEVELS {
-        let unsorted = &witness.uns_levels[level];
-        let sorted_arr = &witness.sorted_levels[level];
+        // 3. Level-by-level verification
+        for level in 0..LEVELS {
+            let unsorted = &witness.uns_levels[level];
+            let sorted_arr = &witness.sorted_levels[level];
 
-        // Verify this shuffle level (row constraints + permutation check)
-        verify_shuffle_level::<_, N>(cs.clone(), unsorted, sorted_arr, alpha, beta)?;
-    }
+            // Verify this shuffle level (row constraints + permutation check)
+            verify_shuffle_level::<_, N>(cs.clone(), unsorted, sorted_arr, alpha, beta)?;
+        }
 
-    // 4. Final permutation check using ElGamal ciphertexts (7 challenges)
-    // This verifies that initial and final ciphertexts form the same multiset
-    // The 7 challenges are: 1 for index + 6 for ElGamal components (c1.x, c1.y, c1.z, c2.x, c2.y, c2.z)
-    check_grand_product::<G::BaseField, IndexedElGamalCiphertext<G>, 7>(
-        cs,
-        &ciphertexts_initial,
-        &ciphertexts_final,
-        &[
-            alpha.clone(), // For index
-            beta.clone(),  // For c1.x
-            beta_2,        // For c1.y
-            beta_3,        // For c1.z
-            beta_4,        // For c2.x
-            beta_5,        // For c2.y
-            beta_6,        // For c2.z
-        ],
-    )?;
+        // 4. Final permutation check using ElGamal ciphertexts (7 challenges)
+        // This verifies that initial and final ciphertexts form the same multiset
+        // The 7 challenges are: 1 for index + 6 for ElGamal components (c1.x, c1.y, c1.z, c2.x, c2.y, c2.z)
+        check_grand_product::<G::BaseField, IndexedElGamalCiphertext<G>, 7>(
+            cs.clone(),
+            &ciphertexts_initial,
+            &ciphertexts_final,
+            &[
+                alpha.clone(), // For index
+                beta.clone(),  // For c1.x
+                beta_2,        // For c1.y
+                beta_3,        // For c1.z
+                beta_4,        // For c2.x
+                beta_5,        // For c2.y
+                beta_6,        // For c2.z
+            ],
+        )?;
 
-    Ok(())
+        Ok(())
+    })
 }
 
 /// RS Shuffle Circuit - Main circuit for verifying RS shuffle
@@ -129,55 +134,57 @@ where
         self,
         cs: ConstraintSystemRef<G::BaseField>,
     ) -> Result<(), SynthesisError> {
-        // Allocate seed as public input
-        let seed_var = FpVar::new_variable(cs.clone(), || Ok(self.seed), AllocationMode::Input)?;
+        track_constraints!(&cs, "rs shuffle with variable allocation", LOG_TARGET, {
+            // Allocate seed as public input
+            let seed_var =
+                FpVar::new_variable(cs.clone(), || Ok(self.seed), AllocationMode::Input)?;
 
-        // Use prepare_witness_data_circuit to create witness data from seed
-        let witness_var = super::witness_preparation::prepare_witness_data_circuit::<G::BaseField>(
-            cs.clone(),
-            &seed_var,
-            &self.witness,
-            self.num_samples,
-        )?;
+            // Use prepare_witness_data_circuit to create witness data from seed
+            let witness_var = super::witness_preparation::prepare_witness_data_circuit::<
+                G::BaseField,
+            >(cs.clone(), &seed_var, &self.witness, self.num_samples)?;
 
-        // Allocate ElGamal ciphertexts as public inputs
-        let ct_init_vars: Vec<ElGamalCiphertextVar<G>> = self
-            .ct_init_pub
-            .iter()
-            .map(|ct| {
-                ElGamalCiphertextVar::<G>::new_variable(
-                    cs.clone(),
-                    || Ok(ct),
-                    AllocationMode::Input,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+            // Allocate ElGamal ciphertexts as public inputs
+            let ct_init_vars: Vec<ElGamalCiphertextVar<G>> = self
+                .ct_init_pub
+                .iter()
+                .map(|ct| {
+                    ElGamalCiphertextVar::<G>::new_variable(
+                        cs.clone(),
+                        || Ok(ct),
+                        AllocationMode::Input,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
 
-        let ct_final_vars: Vec<ElGamalCiphertextVar<G>> = self
-            .ct_after_shuffle
-            .iter()
-            .map(|ct| {
-                ElGamalCiphertextVar::<G>::new_variable(
-                    cs.clone(),
-                    || Ok(ct),
-                    AllocationMode::Input,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+            let ct_final_vars: Vec<ElGamalCiphertextVar<G>> = self
+                .ct_after_shuffle
+                .iter()
+                .map(|ct| {
+                    ElGamalCiphertextVar::<G>::new_variable(
+                        cs.clone(),
+                        || Ok(ct),
+                        AllocationMode::Input,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
 
-        // Allocate challenges as public inputs
-        let alpha_var = FpVar::new_variable(cs.clone(), || Ok(self.alpha), AllocationMode::Input)?;
-        let beta_var = FpVar::new_variable(cs.clone(), || Ok(self.beta), AllocationMode::Input)?;
+            // Allocate challenges as public inputs
+            let alpha_var =
+                FpVar::new_variable(cs.clone(), || Ok(self.alpha), AllocationMode::Input)?;
+            let beta_var =
+                FpVar::new_variable(cs.clone(), || Ok(self.beta), AllocationMode::Input)?;
 
-        // Call the main verification function
-        rs_shuffle::<G, N, LEVELS>(
-            cs,
-            &ct_init_vars,
-            &ct_final_vars,
-            &witness_var,
-            &alpha_var,
-            &beta_var,
-        )
+            // Call the main verification function
+            rs_shuffle::<G, N, LEVELS>(
+                cs.clone(),
+                &ct_init_vars,
+                &ct_final_vars,
+                &witness_var,
+                &alpha_var,
+                &beta_var,
+            )
+        })
     }
 }
 
@@ -368,30 +375,32 @@ pub fn verify_shuffle_level<F, const N: usize>(
 where
     F: PrimeField,
 {
-    // Step 1: Verify row-local constraints
-    let idx_next_pos_pairs = verify_row_constraints::<_, N>(cs.clone(), unsorted_arr)?;
+    track_constraints!(&cs, "verify shuffle level", LOG_TARGET, {
+        // Step 1: Verify row-local constraints
+        let idx_next_pos_pairs = verify_row_constraints::<_, N>(cs.clone(), unsorted_arr)?;
 
-    // Step 2: Build right-side pairs (idx, pos) from next array
-    let idx_pos_pairs: Vec<IndexPositionPair<F>> = sorted_arr
-        .iter()
-        .enumerate()
-        .map(|(j, nr)| {
-            IndexPositionPair::new(
-                nr.idx.clone(),
-                FpVar::new_constant(cs.clone(), F::from(j as u64)).unwrap(),
-            )
-        })
-        .collect();
+        // Step 2: Build right-side pairs (idx, pos) from next array
+        let idx_pos_pairs: Vec<IndexPositionPair<F>> = sorted_arr
+            .iter()
+            .enumerate()
+            .map(|(j, nr)| {
+                IndexPositionPair::new(
+                    nr.idx.clone(),
+                    FpVar::new_constant(cs.clone(), F::from(j as u64)).unwrap(),
+                )
+            })
+            .collect();
 
-    // Step 3: Check multiset equality for this level using 2 challenges
-    check_grand_product::<F, IndexPositionPair<F>, 2>(
-        cs,
-        &idx_next_pos_pairs,
-        &idx_pos_pairs,
-        &[alpha.clone(), beta.clone()],
-    )?;
+        // Step 3: Check multiset equality for this level using 2 challenges
+        check_grand_product::<F, IndexPositionPair<F>, 2>(
+            cs.clone(),
+            &idx_next_pos_pairs,
+            &idx_pos_pairs,
+            &[alpha.clone(), beta.clone()],
+        )?;
 
-    Ok(())
+        Ok(())
+    })
 }
 
 #[cfg(test)]
@@ -931,34 +940,42 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .expect("Failed to allocate shuffled ciphertexts");
 
-        // Allocate seed as a circuit variable
-        let seed_var = FpVar::new_constant(cs.clone(), seed).expect("Failed to allocate seed");
+        track_constraints!(
+            &cs,
+            "rs_shuffle test - witness preparation and verification",
+            TEST_TARGET,
+            {
+                // Allocate seed as a circuit variable
+                let seed_var =
+                    FpVar::new_constant(cs.clone(), seed).expect("Failed to allocate seed");
 
-        // Allocate witness data
-        let witness_var = prepare_witness_data_circuit::<BaseField>(
-            cs.clone(),
-            &seed_var,
-            &witness_data,
-            num_samples,
-        )
-        .expect("Failed to allocate witness data");
+                // Allocate witness data
+                let witness_var = prepare_witness_data_circuit::<BaseField>(
+                    cs.clone(),
+                    &seed_var,
+                    &witness_data,
+                    num_samples,
+                )
+                .expect("Failed to allocate witness data");
 
-        // // Create realistic Fiat-Shamir challenges
-        let alpha = FpVar::new_constant(cs.clone(), BaseField::from(17u64))
-            .expect("Failed to create alpha");
-        let beta =
-            FpVar::new_constant(cs.clone(), BaseField::from(23u64)).expect("Failed to create beta");
+                // Create realistic Fiat-Shamir challenges
+                let alpha = FpVar::new_constant(cs.clone(), BaseField::from(17u64))
+                    .expect("Failed to create alpha");
+                let beta = FpVar::new_constant(cs.clone(), BaseField::from(23u64))
+                    .expect("Failed to create beta");
 
-        // // 6. Run the rs_shuffle verification function
-        rs_shuffle::<GrumpkinConfig, N, LEVELS>(
-            cs.clone(),
-            &ct_init_vars,
-            &ct_final_vars,
-            &witness_var,
-            &alpha,
-            &beta,
-        )
-        .expect("rs_shuffle verification failed");
+                // 6. Run the rs_shuffle verification function
+                rs_shuffle::<GrumpkinConfig, N, LEVELS>(
+                    cs.clone(),
+                    &ct_init_vars,
+                    &ct_final_vars,
+                    &witness_var,
+                    &alpha,
+                    &beta,
+                )
+                .expect("rs_shuffle verification failed");
+            }
+        );
 
         // 7. Verify the constraint system is satisfied
         check_cs_satisfied(&cs).expect("Constraint system should be satisfied for valid shuffle");
@@ -992,26 +1009,33 @@ mod tests {
 
         tracing::debug!(target: TEST_TARGET, "✓ Test passed: RS shuffle ordinary case");
 
-        // Print ciphertexts before and after permutation for debugging
-        println!("Ciphertexts before permutation:");
+        // Log ciphertexts before and after permutation for debugging
+        tracing::trace!(target: TEST_TARGET, "Ciphertexts before permutation:");
         for (i, ct) in ct_init.iter().enumerate() {
-            println!(
-                "ct_init[{}]: c1=({}, {}, {}), c2=({}, {}, {})",
+            tracing::trace!(
+                target: TEST_TARGET,
+                "ct_init[{}]: c1=({:?}, {:?}, {:?}), c2=({:?}, {:?}, {:?})",
                 i, ct.c1.x, ct.c1.y, ct.c1.z, ct.c2.x, ct.c2.y, ct.c2.z
             );
         }
 
-        println!("Ciphertexts after permutation:");
+        tracing::trace!(target: TEST_TARGET, "Ciphertexts after permutation:");
         for (i, ct) in ct_after_shuffle.iter().enumerate() {
-            println!(
-                "ct_after_shuffle[{}]: c1=({}, {}, {}), c2=({}, {}, {})",
+            tracing::trace!(
+                target: TEST_TARGET,
+                "ct_after_shuffle[{}]: c1=({:?}, {:?}, {:?}), c2=({:?}, {:?}, {:?})",
                 i, ct.c1.x, ct.c1.y, ct.c1.z, ct.c2.x, ct.c2.y, ct.c2.z
             );
         }
 
-        println!("Permutation mapping:");
+        tracing::trace!(target: TEST_TARGET, "Permutation mapping:");
         for (position, sorted_row) in final_sorted.iter().enumerate() {
-            println!("Position {} <- Original index {}", position, sorted_row.idx);
+            tracing::trace!(
+                target: TEST_TARGET,
+                "Position {} <- Original index {}",
+                position,
+                sorted_row.idx
+            );
         }
     }
 }
