@@ -15,7 +15,7 @@ use ark_ff::{Field, PrimeField};
 use ark_r1cs_std::{
     alloc::{AllocVar, AllocationMode},
     eq::EqGadget,
-    fields::{fp::FpVar, FieldVar},
+    fields::fp::FpVar,
     R1CSVar,
 };
 use ark_relations::ns;
@@ -455,7 +455,7 @@ mod tests {
     use ark_bn254::{Bn254, Fr};
     use ark_crypto_primitives::sponge::poseidon::PoseidonSponge;
     use ark_ff::Field;
-    use ark_r1cs_std::{alloc::AllocVar, fields::fp::FpVar, R1CSVar};
+    use ark_r1cs_std::{alloc::AllocVar, fields::{fp::FpVar, FieldVar}, R1CSVar};
     use ark_relations::r1cs::ConstraintSystem;
     use ark_relations::r1cs::ConstraintSystemRef;
     use ark_std::{marker::PhantomData, test_rng, UniformRand};

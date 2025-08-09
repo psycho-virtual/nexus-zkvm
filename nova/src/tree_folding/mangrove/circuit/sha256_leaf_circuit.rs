@@ -1,9 +1,6 @@
 use super::{FnCircuit, IntoFpVarVec};
 use ark_ff::PrimeField;
-use ark_r1cs_std::{
-    fields::fp::FpVar,
-    R1CSVar,
-};
+use ark_r1cs_std::fields::fp::FpVar;
 use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
 use std::marker::PhantomData;
 use tracing::{debug, info, info_span, instrument};
@@ -151,7 +148,7 @@ pub fn run_native_sha256_chain(initial_data: &[u8], iterations: usize) -> Vec<u8
 mod tests {
     use super::*;
     use ark_bn254::Fr;
-    use ark_r1cs_std::prelude::AllocVar;
+    use ark_r1cs_std::{prelude::AllocVar, R1CSVar};
     use ark_relations::r1cs::ConstraintSystem;
     use tracing_subscriber::{
         filter, fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt,

@@ -241,7 +241,7 @@ mod tests {
     use ark_bn254::Fr as Bn254Fr;
     use ark_ff::UniformRand;
     use ark_r1cs_std::{alloc::AllocVar, fields::FieldVar, R1CSVar};
-    use ark_std::test_rng;
+    use ark_std::{test_rng, One, Zero};
     use tracing::error;
     use tracing_subscriber::{
         filter, fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt,

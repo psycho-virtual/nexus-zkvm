@@ -27,6 +27,5 @@ pub use data_structures::{SortedRow, SortedRowVar, UnsortedRow, UnsortedRowVar, 
 // Witness preparation
 pub use witness_preparation::{prepare_witness_data, prepare_witness_data_circuit};
 
-// Legacy circuit (deprecated)
-#[allow(deprecated)]
+// Main circuit implementation
 pub use circuit::RSShuffleCircuit;

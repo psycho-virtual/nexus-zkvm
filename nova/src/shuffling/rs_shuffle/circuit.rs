@@ -105,39 +105,42 @@ where
     Ok(())
 }
 
-// Legacy circuit wrapper - can be removed if not needed
-/// RS Shuffle Circuit (deprecated - use rs_shuffle function instead)
-#[deprecated(note = "Use rs_shuffle function directly with SNARK variables")]
+/// RS Shuffle Circuit - Main circuit for verifying RS shuffle
 pub struct RSShuffleCircuit<F, C>
 where
     F: PrimeField,
     C: CurveGroup<BaseField = F>,
 {
     pub ct_init_pub: Vec<ElGamalCiphertext<C>>,
-    pub witness: WitnessData<N, LEVELS>,
+    pub ct_after_shuffle: Vec<ElGamalCiphertext<C>>,
+    pub seed: F,
     pub alpha: F,
     pub beta: F,
-    pub ct_after_shuffle: Vec<ElGamalCiphertext<C>>,
+    pub witness: WitnessData<N, LEVELS>,
+    pub num_samples: usize,
 }
 
-#[allow(deprecated)]
 impl<G> ConstraintSynthesizer<G::BaseField> for RSShuffleCircuit<G::BaseField, Projective<G>>
 where
     G: SWCurveConfig,
-    G::BaseField: PrimeField,
+    G::BaseField: PrimeField + ark_crypto_primitives::sponge::Absorb,
 {
     fn generate_constraints(
         self,
         cs: ConstraintSystemRef<G::BaseField>,
     ) -> Result<(), SynthesisError> {
-        // Allocate witness data
-        let witness_var = WitnessDataVar::<G::BaseField, N, LEVELS>::new_variable(
+        // Allocate seed as public input
+        let seed_var = FpVar::new_variable(cs.clone(), || Ok(self.seed), AllocationMode::Input)?;
+
+        // Use prepare_witness_data_circuit to create witness data from seed
+        let witness_var = super::witness_preparation::prepare_witness_data_circuit::<G::BaseField>(
             cs.clone(),
-            || Ok(&self.witness),
-            AllocationMode::Witness,
+            &seed_var,
+            &self.witness,
+            self.num_samples,
         )?;
 
-        // Allocate ElGamal ciphertexts
+        // Allocate ElGamal ciphertexts as public inputs
         let ct_init_vars: Vec<ElGamalCiphertextVar<G>> = self
             .ct_init_pub
             .iter()
@@ -162,7 +165,7 @@ where
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        // Allocate challenges
+        // Allocate challenges as public inputs
         let alpha_var = FpVar::new_variable(cs.clone(), || Ok(self.alpha), AllocationMode::Input)?;
         let beta_var = FpVar::new_variable(cs.clone(), || Ok(self.beta), AllocationMode::Input)?;
 
@@ -202,7 +205,7 @@ where
         // Boolean<F> guarantees b_i ∈ {0, 1}
         // ============================================================
         let one = FpVar::<F>::one();
-        let zero = FpVar::<F>::zero();
+        let _zero = FpVar::<F>::zero();
 
         // Convert Boolean to FpVar for arithmetic operations
         let bit_as_fp: FpVar<F> = u.bit.clone().into();
@@ -397,6 +400,7 @@ mod tests {
     use crate::shuffling::rs_shuffle::data_structures::{
         SortedRow, SortedRowVar, UnsortedRow, UnsortedRowVar,
     };
+    use crate::shuffling::rs_shuffle::prepare_witness_data_circuit;
     use crate::shuffling::rs_shuffle::witness_preparation::build_level;
     use ark_bls12_381::Fr as TestField;
     use ark_r1cs_std::alloc::AllocVar;
@@ -840,5 +844,174 @@ mod tests {
 
         tracing::debug!(target: TEST_TARGET, "✓ Level 2 shuffle verification passed");
         tracing::debug!(target: TEST_TARGET, "✓ Test passed: Two successive shuffle levels verification");
+    }
+
+    #[test]
+    fn test_rs_shuffle_ordinary_case() {
+        let _guard = setup_test_tracing();
+        const N: usize = 52;
+        const LEVELS: usize = 5;
+
+        use crate::shuffling::data_structures::{ElGamalCiphertext, ElGamalCiphertextVar};
+        use crate::shuffling::rs_shuffle::witness_preparation::prepare_witness_data;
+        use ark_bn254::Fr as BaseField;
+        use ark_ec::PrimeGroup;
+        use ark_grumpkin::{GrumpkinConfig, Projective as GrumpkinProjective};
+        use ark_std::UniformRand;
+
+        tracing::debug!(target: TEST_TARGET, "Starting test_rs_shuffle_ordinary_case");
+
+        // 1. Create 52 ElGamal ciphertexts using the Grumpkin curve
+        let mut rng = ark_std::test_rng();
+        let generator = GrumpkinProjective::generator();
+
+        // Generate a public key for encryption
+        let private_key = <GrumpkinConfig as ark_ec::CurveConfig>::ScalarField::rand(&mut rng);
+        let public_key = generator * private_key;
+
+        // Create 52 ciphertexts with distinct messages
+        let ct_init: Vec<ElGamalCiphertext<GrumpkinProjective>> = (0..N)
+            .map(|i| {
+                let message =
+                    <GrumpkinConfig as ark_ec::CurveConfig>::ScalarField::from((i + 1) as u64);
+                let randomness =
+                    <GrumpkinConfig as ark_ec::CurveConfig>::ScalarField::rand(&mut rng);
+                ElGamalCiphertext::encrypt_scalar(message, randomness, public_key)
+            })
+            .collect();
+
+        // 2. Use a regular seed value to generate witness data with mixed bits
+        let seed = BaseField::from(42u64);
+        let (witness_data, num_samples) = prepare_witness_data::<BaseField>(seed);
+
+        tracing::debug!(
+            target: TEST_TARGET,
+            "Generated witness data with {} samples",
+            num_samples
+        );
+
+        // 3. Prepare witness data and extract the final permutation
+        // The final permutation is encoded in witness_data.next_levels[LEVELS - 1]
+        // where each SortedRow.idx tells us which original element ends up at that position
+        let final_sorted = &witness_data.next_levels[LEVELS - 1];
+
+        // 4. Permute the ciphertexts according to the witness data's final permutation
+        let mut ct_after_shuffle = vec![ct_init[0].clone(); N];
+        for (position, sorted_row) in final_sorted.iter().enumerate() {
+            // sorted_row.idx is the original index that should be at this position
+            ct_after_shuffle[position] = ct_init[sorted_row.idx as usize].clone();
+        }
+
+        // 5. Create constraint system and allocate all circuit variables
+        let cs = ConstraintSystem::<BaseField>::new_ref();
+
+        // Allocate initial ciphertexts as witness
+        let ct_init_vars: Vec<ElGamalCiphertextVar<GrumpkinConfig>> = ct_init
+            .iter()
+            .map(|ct| {
+                ElGamalCiphertextVar::<GrumpkinConfig>::new_variable(
+                    cs.clone(),
+                    || Ok(ct),
+                    AllocationMode::Witness,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .expect("Failed to allocate initial ciphertexts");
+
+        // Allocate shuffled ciphertexts as witness
+        let ct_final_vars: Vec<ElGamalCiphertextVar<GrumpkinConfig>> = ct_after_shuffle
+            .iter()
+            .map(|ct| {
+                ElGamalCiphertextVar::<GrumpkinConfig>::new_variable(
+                    cs.clone(),
+                    || Ok(ct),
+                    AllocationMode::Witness,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .expect("Failed to allocate shuffled ciphertexts");
+
+        // Allocate seed as a circuit variable
+        let seed_var = FpVar::new_constant(cs.clone(), seed).expect("Failed to allocate seed");
+
+        // Allocate witness data
+        let witness_var = prepare_witness_data_circuit::<BaseField>(
+            cs.clone(),
+            &seed_var,
+            &witness_data,
+            num_samples,
+        )
+        .expect("Failed to allocate witness data");
+
+        // // Create realistic Fiat-Shamir challenges
+        let alpha = FpVar::new_constant(cs.clone(), BaseField::from(17u64))
+            .expect("Failed to create alpha");
+        let beta =
+            FpVar::new_constant(cs.clone(), BaseField::from(23u64)).expect("Failed to create beta");
+
+        // // 6. Run the rs_shuffle verification function
+        rs_shuffle::<GrumpkinConfig, N, LEVELS>(
+            cs.clone(),
+            &ct_init_vars,
+            &ct_final_vars,
+            &witness_var,
+            &alpha,
+            &beta,
+        )
+        .expect("rs_shuffle verification failed");
+
+        // 7. Verify the constraint system is satisfied
+        check_cs_satisfied(&cs).expect("Constraint system should be satisfied for valid shuffle");
+
+        // 8. Check that the permutation preserves the multiset of ciphertexts
+        // Verify that we have exactly N elements and they form a permutation
+        let mut index_set: std::collections::HashSet<u16> = std::collections::HashSet::new();
+        for sorted_row in final_sorted.iter() {
+            assert!(
+                index_set.insert(sorted_row.idx),
+                "Duplicate index {} in permutation",
+                sorted_row.idx
+            );
+        }
+        assert_eq!(index_set.len(), N, "Permutation should contain all indices");
+
+        // Check that the bits across all levels are mixed (not all 0s or all 1s)
+        for level in 0..LEVELS {
+            let ones_count = witness_data.bits_mat[level].iter().filter(|&&b| b).count();
+            tracing::debug!(
+                target: TEST_TARGET,
+                "Level {} has {} ones out of {} bits",
+                level,
+                ones_count,
+                N
+            );
+            // In ordinary case, we expect mixed bits (neither all 0s nor all 1s)
+            assert!(ones_count > 0, "Level {} should have some 1s", level);
+            assert!(ones_count < N, "Level {} should have some 0s", level);
+        }
+
+        tracing::debug!(target: TEST_TARGET, "✓ Test passed: RS shuffle ordinary case");
+
+        // Print ciphertexts before and after permutation for debugging
+        println!("Ciphertexts before permutation:");
+        for (i, ct) in ct_init.iter().enumerate() {
+            println!(
+                "ct_init[{}]: c1=({}, {}, {}), c2=({}, {}, {})",
+                i, ct.c1.x, ct.c1.y, ct.c1.z, ct.c2.x, ct.c2.y, ct.c2.z
+            );
+        }
+
+        println!("Ciphertexts after permutation:");
+        for (i, ct) in ct_after_shuffle.iter().enumerate() {
+            println!(
+                "ct_after_shuffle[{}]: c1=({}, {}, {}), c2=({}, {}, {})",
+                i, ct.c1.x, ct.c1.y, ct.c1.z, ct.c2.x, ct.c2.y, ct.c2.z
+            );
+        }
+
+        println!("Permutation mapping:");
+        for (position, sorted_row) in final_sorted.iter().enumerate() {
+            println!("Position {} <- Original index {}", position, sorted_row.idx);
+        }
     }
 }
