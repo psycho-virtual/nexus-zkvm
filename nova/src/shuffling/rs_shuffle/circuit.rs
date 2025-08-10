@@ -197,6 +197,34 @@ where
     pub num_samples: usize,
 }
 
+/// RS Shuffle with Re-encryption Circuit - Complete circuit for shuffle + re-encryption
+pub struct RSShuffleWithReencryptionCircuit<F, C>
+where
+    F: PrimeField,
+    C: CurveGroup<BaseField = F>,
+{
+    /// Initial ciphertexts before shuffle (public input)
+    pub ct_init_pub: Vec<ElGamalCiphertext<C>>,
+    /// Intermediate ciphertexts after shuffle, before re-encryption (witness)
+    pub ct_after_shuffle: Vec<ElGamalCiphertext<C>>,
+    /// Final ciphertexts after shuffle and re-encryption (public input)
+    pub ct_final_reencrypted: Vec<ElGamalCiphertext<C>>,
+    /// Seed for deterministic witness generation
+    pub seed: F,
+    /// Shuffler's public key for re-encryption
+    pub shuffler_pk: C,
+    /// Re-encryption randomization values (witness)
+    pub encryption_randomizations: Vec<F>,
+    /// First Fiat-Shamir challenge
+    pub alpha: F,
+    /// Second Fiat-Shamir challenge
+    pub beta: F,
+    /// Witness data for the shuffle
+    pub witness: WitnessData<N, LEVELS>,
+    /// Number of samples used in bit generation
+    pub num_samples: usize,
+}
+
 impl<G> ConstraintSynthesizer<G::BaseField> for RSShuffleCircuit<G::BaseField, Projective<G>>
 where
     G: SWCurveConfig,
@@ -257,6 +285,146 @@ where
                 &beta_var,
             )
         })
+    }
+}
+
+impl<G> ConstraintSynthesizer<G::BaseField>
+    for RSShuffleWithReencryptionCircuit<G::BaseField, Projective<G>>
+where
+    G: SWCurveConfig,
+    G::BaseField: PrimeField + ark_crypto_primitives::sponge::Absorb,
+{
+    fn generate_constraints(
+        self,
+        cs: ConstraintSystemRef<G::BaseField>,
+    ) -> Result<(), SynthesisError> {
+        track_constraints!(
+            &cs,
+            "rs shuffle with reencryption and variable allocation",
+            LOG_TARGET,
+            {
+                // Allocate seed as public input
+                let seed_var =
+                    FpVar::new_variable(cs.clone(), || Ok(self.seed), AllocationMode::Input)?;
+
+                // Use prepare_witness_data_circuit to create witness data from seed
+                let witness_var = super::witness_preparation::prepare_witness_data_circuit::<
+                    G::BaseField,
+                >(
+                    cs.clone(), &seed_var, &self.witness, self.num_samples
+                )?;
+
+                // Allocate initial ElGamal ciphertexts as public inputs
+                let ct_init_vars: Vec<ElGamalCiphertextVar<G>> = self
+                    .ct_init_pub
+                    .iter()
+                    .map(|ct| {
+                        ElGamalCiphertextVar::<G>::new_variable(
+                            cs.clone(),
+                            || Ok(ct),
+                            AllocationMode::Input,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                // Allocate intermediate shuffled ciphertexts as witness
+                let ct_after_shuffle_vars: Vec<ElGamalCiphertextVar<G>> = self
+                    .ct_after_shuffle
+                    .iter()
+                    .map(|ct| {
+                        ElGamalCiphertextVar::<G>::new_variable(
+                            cs.clone(),
+                            || Ok(ct),
+                            AllocationMode::Witness,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                // Allocate final re-encrypted ciphertexts as public inputs
+                let ct_final_reencrypted_vars: Vec<ElGamalCiphertextVar<G>> = self
+                    .ct_final_reencrypted
+                    .iter()
+                    .map(|ct| {
+                        ElGamalCiphertextVar::<G>::new_variable(
+                            cs.clone(),
+                            || Ok(ct),
+                            AllocationMode::Input,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                // Allocate shuffler public key as public input
+                let shuffler_pk_var = ProjectiveVar::<G, FpVar<G::BaseField>>::new_variable(
+                    cs.clone(),
+                    || Ok(self.shuffler_pk),
+                    AllocationMode::Input,
+                )?;
+
+                // Allocate re-encryption randomizations as witness
+                let encryption_randomizations_vars: Vec<FpVar<G::BaseField>> = self
+                    .encryption_randomizations
+                    .iter()
+                    .map(|r| FpVar::new_variable(cs.clone(), || Ok(*r), AllocationMode::Witness))
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                // Allocate challenges as public inputs
+                let alpha_var =
+                    FpVar::new_variable(cs.clone(), || Ok(self.alpha), AllocationMode::Input)?;
+                let beta_var =
+                    FpVar::new_variable(cs.clone(), || Ok(self.beta), AllocationMode::Input)?;
+
+                // Convert Vecs to arrays for the function call
+                // We need to check that the vectors have the correct length
+                if ct_init_vars.len() != N {
+                    return Err(SynthesisError::Unsatisfiable);
+                }
+                if ct_after_shuffle_vars.len() != N {
+                    return Err(SynthesisError::Unsatisfiable);
+                }
+                if encryption_randomizations_vars.len() != N {
+                    return Err(SynthesisError::Unsatisfiable);
+                }
+
+                // Convert to arrays using try_into
+                let ct_init_array: [ElGamalCiphertextVar<G>; N] = ct_init_vars
+                    .try_into()
+                    .map_err(|_| SynthesisError::Unsatisfiable)?;
+                let ct_after_shuffle_array: [ElGamalCiphertextVar<G>; N] = ct_after_shuffle_vars
+                    .try_into()
+                    .map_err(|_| SynthesisError::Unsatisfiable)?;
+                let encryption_randomizations_array: [FpVar<G::BaseField>; N] =
+                    encryption_randomizations_vars
+                        .try_into()
+                        .map_err(|_| SynthesisError::Unsatisfiable)?;
+
+                // Call the main verification function
+                let reencrypted_result = rs_shuffle_with_reencryption::<G, N, LEVELS>(
+                    cs.clone(),
+                    &ct_init_array,
+                    &ct_after_shuffle_array,
+                    &witness_var,
+                    &encryption_randomizations_array,
+                    &shuffler_pk_var,
+                    &alpha_var,
+                    &beta_var,
+                )?;
+
+                // Verify that the result matches the expected final ciphertexts
+                if reencrypted_result.len() != ct_final_reencrypted_vars.len() {
+                    return Err(SynthesisError::Unsatisfiable);
+                }
+
+                for (result_ct, expected_ct) in reencrypted_result
+                    .iter()
+                    .zip(ct_final_reencrypted_vars.iter())
+                {
+                    result_ct.c1.enforce_equal(&expected_ct.c1)?;
+                    result_ct.c2.enforce_equal(&expected_ct.c2)?;
+                }
+
+                Ok(())
+            }
+        )
     }
 }
 
