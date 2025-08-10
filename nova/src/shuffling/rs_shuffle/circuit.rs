@@ -15,7 +15,9 @@ use ark_r1cs_std::{
     eq::EqGadget,
     fields::FieldVar,
 };
-use ark_r1cs_std::{fields::fp::FpVar, prelude::*};
+use ark_r1cs_std::{
+    fields::fp::FpVar, groups::curves::short_weierstrass::ProjectiveVar, prelude::*,
+};
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
 use std::ops::Not;
 
@@ -107,6 +109,76 @@ where
         )?;
 
         Ok(())
+    })
+}
+
+/// Verify RS shuffle with re-encryption in a SNARK circuit
+///
+/// This function verifies that a shuffle was performed correctly followed by re-encryption:
+/// 1. Verifies the shuffle from initial to intermediate ciphertexts
+/// 2. Applies re-encryption to the shuffled ciphertexts
+/// 3. Returns the re-encrypted ciphertexts
+///
+/// # Type Parameters
+/// - `G`: The elliptic curve configuration
+/// - `N`: The number of elements being shuffled
+/// - `LEVELS`: The number of levels in the shuffle
+///
+/// # Parameters
+/// - `cs`: The constraint system reference
+/// - `ct_init_pub`: Initial ElGamal ciphertexts before shuffle
+/// - `ct_after_shuffle`: Intermediate ciphertexts after shuffle, before re-encryption
+/// - `witness`: The witness data containing the shuffle permutation
+/// - `encryption_randomizations`: Randomness values for re-encryption
+/// - `shuffler_pk`: Public key for re-encryption
+/// - `alpha`: First Fiat-Shamir challenge
+/// - `beta`: Second Fiat-Shamir challenge
+///
+/// # Returns
+/// - `Ok(Vec<ElGamalCiphertextVar<G>>)` containing the re-encrypted ciphertexts if successful
+/// - `Err(SynthesisError)` if any constraint fails
+pub fn rs_shuffle_with_reencryption<G, const N: usize, const LEVELS: usize>(
+    cs: ConstraintSystemRef<G::BaseField>,
+    ct_init_pub: &[ElGamalCiphertextVar<G>; N],
+    ct_after_shuffle: &[ElGamalCiphertextVar<G>; N],
+    witness_table: &WitnessDataVar<G::BaseField, N, LEVELS>,
+    encryption_randomizations: &[FpVar<G::BaseField>; N],
+    shuffler_pk: &ProjectiveVar<G, FpVar<G::BaseField>>,
+    alpha: &FpVar<G::BaseField>,
+    beta: &FpVar<G::BaseField>,
+) -> Result<Vec<ElGamalCiphertextVar<G>>, SynthesisError>
+where
+    G: SWCurveConfig,
+    G::BaseField: PrimeField,
+{
+    track_constraints!(&cs, "rs shuffle with reencryption", LOG_TARGET, {
+        // Step 1: Verify the shuffle from initial to intermediate ciphertexts
+        tracing::debug!(target: LOG_TARGET, "Verifying RS shuffle");
+        rs_shuffle::<G, N, LEVELS>(
+            cs.clone(),
+            ct_init_pub,
+            ct_after_shuffle,
+            witness_table,
+            alpha,
+            beta,
+        )?;
+
+        // Step 2: Apply re-encryption to the shuffled ciphertexts
+        tracing::debug!(target: LOG_TARGET, "Applying re-encryption to shuffled ciphertexts");
+
+        // Convert array to Vec for the re-encryption function
+        let ct_after_shuffle_vec = ct_after_shuffle.to_vec();
+        let encryption_randomizations_vec = encryption_randomizations.to_vec();
+
+        let reencrypted_deck = crate::shuffling::encryption::ElGamalEncryption::<G>::reencrypt_cards_with_new_randomization(
+            cs.clone(),
+            &ct_after_shuffle_vec,
+            &encryption_randomizations_vec,
+            shuffler_pk,
+        )?;
+
+        tracing::debug!(target: LOG_TARGET, "RS shuffle with re-encryption completed successfully");
+        Ok(reencrypted_deck)
     })
 }
 
@@ -424,7 +496,8 @@ mod tests {
     fn setup_test_tracing() -> tracing::subscriber::DefaultGuard {
         let filter = filter::Targets::new()
             .with_target(TEST_TARGET, tracing::Level::DEBUG)
-            .with_target(LOG_TARGET, tracing::Level::DEBUG);
+            .with_target(LOG_TARGET, tracing::Level::DEBUG)
+            .with_target("shuffle", tracing::Level::DEBUG);
 
         tracing_subscriber::registry()
             .with(
@@ -1037,5 +1110,167 @@ mod tests {
                 sorted_row.idx
             );
         }
+    }
+
+    #[test]
+    fn test_rs_shuffle_with_reencryption() {
+        let _guard = setup_test_tracing();
+        const N: usize = 52;
+        const LEVELS: usize = 5;
+
+        use crate::shuffling::data_structures::{ElGamalCiphertext, ElGamalCiphertextVar};
+        use crate::shuffling::rs_shuffle::witness_preparation::apply_rs_shuffle_permutation;
+        use ark_bn254::Fr as BaseField;
+        use ark_ec::PrimeGroup;
+        use ark_ff::BigInteger;
+        use ark_grumpkin::{GrumpkinConfig, Projective as GrumpkinProjective};
+        use ark_r1cs_std::groups::curves::short_weierstrass::ProjectiveVar;
+        use ark_std::UniformRand;
+
+        tracing::debug!(target: TEST_TARGET, "Starting test_rs_shuffle_with_reencryption");
+
+        // 1. Setup: Create ElGamal ciphertexts and keys
+        let mut rng = ark_std::test_rng();
+        let generator = GrumpkinProjective::generator();
+
+        // Generate shuffler keys
+        let shuffler_private_key =
+            <GrumpkinConfig as ark_ec::CurveConfig>::ScalarField::rand(&mut rng);
+        let shuffler_public_key = generator * shuffler_private_key;
+
+        // Create N ciphertexts with distinct messages
+        let ct_init: [ElGamalCiphertext<GrumpkinProjective>; N] = std::array::from_fn(|i| {
+            let message =
+                <GrumpkinConfig as ark_ec::CurveConfig>::ScalarField::from((i + 1) as u64);
+            let randomness = <GrumpkinConfig as ark_ec::CurveConfig>::ScalarField::rand(&mut rng);
+            ElGamalCiphertext::encrypt_scalar(message, randomness, shuffler_public_key)
+        });
+
+        // 2. Native execution
+        let seed = BaseField::from(42u64);
+
+        // Apply RS shuffle permutation
+        let (witness_data, num_samples, ct_after_shuffle_native) =
+            apply_rs_shuffle_permutation::<BaseField, _>(seed, &ct_init);
+
+        tracing::debug!(
+            target: TEST_TARGET,
+            "Native shuffle completed with {} samples",
+            num_samples
+        );
+
+        // Generate re-encryption randomizations
+        let rerandomizations: [<GrumpkinConfig as ark_ec::CurveConfig>::ScalarField; N] =
+            std::array::from_fn(|_| {
+                <GrumpkinConfig as ark_ec::CurveConfig>::ScalarField::rand(&mut rng)
+            });
+
+        // Apply re-encryption natively
+        let ct_final_native: [ElGamalCiphertext<GrumpkinProjective>; N] =
+            std::array::from_fn(|i| {
+                ct_after_shuffle_native[i]
+                    .add_encryption_layer(rerandomizations[i], shuffler_public_key)
+            });
+
+        // 3. SNARK Circuit execution
+        let cs = ConstraintSystem::<BaseField>::new_ref();
+
+        // Allocate initial ciphertexts
+        let ct_init_vars: [ElGamalCiphertextVar<GrumpkinConfig>; N] = std::array::from_fn(|i| {
+            ElGamalCiphertextVar::<GrumpkinConfig>::new_variable(
+                cs.clone(),
+                || Ok(&ct_init[i]),
+                AllocationMode::Witness,
+            )
+            .expect("Failed to allocate initial ciphertext")
+        });
+
+        // Allocate shuffled ciphertexts (intermediate state)
+        let ct_after_shuffle_vars: [ElGamalCiphertextVar<GrumpkinConfig>; N] =
+            std::array::from_fn(|i| {
+                ElGamalCiphertextVar::<GrumpkinConfig>::new_variable(
+                    cs.clone(),
+                    || Ok(&ct_after_shuffle_native[i]),
+                    AllocationMode::Witness,
+                )
+                .expect("Failed to allocate shuffled ciphertext")
+            });
+
+        // Allocate witness data
+        let seed_var = FpVar::new_constant(cs.clone(), seed).expect("Failed to allocate seed");
+        let witness_var = prepare_witness_data_circuit::<BaseField>(
+            cs.clone(),
+            &seed_var,
+            &witness_data,
+            num_samples,
+        )
+        .expect("Failed to allocate witness data");
+
+        // Allocate re-encryption randomizations
+        let rerandomizations_vars: [FpVar<BaseField>; N] = std::array::from_fn(|i| {
+            // Convert ScalarField to BaseField
+            let scalar_bytes = rerandomizations[i].into_bigint().to_bytes_le();
+            let base_field_value = BaseField::from_le_bytes_mod_order(&scalar_bytes);
+            FpVar::new_witness(cs.clone(), || Ok(base_field_value))
+                .expect("Failed to allocate rerandomization")
+        });
+
+        // Allocate shuffler public key
+        let shuffler_pk_var =
+            ProjectiveVar::<GrumpkinConfig, FpVar<BaseField>>::new_witness(cs.clone(), || {
+                Ok(shuffler_public_key)
+            })
+            .expect("Failed to allocate shuffler public key");
+
+        // Allocate Fiat-Shamir challenges
+        let alpha = FpVar::new_constant(cs.clone(), BaseField::from(17u64))
+            .expect("Failed to create alpha");
+        let beta =
+            FpVar::new_constant(cs.clone(), BaseField::from(23u64)).expect("Failed to create beta");
+
+        // 4. Run the SNARK function
+        let ct_final_snark = rs_shuffle_with_reencryption::<GrumpkinConfig, N, LEVELS>(
+            cs.clone(),
+            &ct_init_vars,
+            &ct_after_shuffle_vars,
+            &witness_var,
+            &rerandomizations_vars,
+            &shuffler_pk_var,
+            &alpha,
+            &beta,
+        )
+        .expect("rs_shuffle_with_reencryption failed");
+
+        // 5. Verify the constraint system is satisfied
+        check_cs_satisfied(&cs).expect("Constraint system should be satisfied");
+
+        // 6. Verify SNARK output matches native execution
+        assert_eq!(ct_final_snark.len(), N, "Output size mismatch");
+
+        for i in 0..N {
+            // Extract values from SNARK variables
+            let snark_c1 = ct_final_snark[i]
+                .c1
+                .value()
+                .expect("Failed to get c1 value");
+            let snark_c2 = ct_final_snark[i]
+                .c2
+                .value()
+                .expect("Failed to get c2 value");
+
+            // Compare with native values
+            assert_eq!(
+                snark_c1, ct_final_native[i].c1,
+                "Mismatch in c1 at index {}",
+                i
+            );
+            assert_eq!(
+                snark_c2, ct_final_native[i].c2,
+                "Mismatch in c2 at index {}",
+                i
+            );
+        }
+
+        tracing::debug!(target: TEST_TARGET, "✓ Test passed: RS shuffle with re-encryption");
     }
 }

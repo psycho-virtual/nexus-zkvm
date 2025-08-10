@@ -133,38 +133,38 @@ where
     where
         G::BaseField: PrimeField,
     {
-        let cs = ns!(cs, "reencrypt_cards_with_new_randomization");
+        crate::track_constraints!(&cs, "reencrypt_cards_with_new_randomization", LOG_TARGET, {
+            if input_deck.len() != encryption_randomizations.len() {
+                return Err(SynthesisError::Unsatisfiable);
+            }
 
-        if input_deck.len() != encryption_randomizations.len() {
-            return Err(SynthesisError::Unsatisfiable);
-        }
+            let mut output_deck = Vec::with_capacity(input_deck.len());
 
-        let mut output_deck = Vec::with_capacity(input_deck.len());
+            for (i, (card, encryption_randomization)) in input_deck
+                .iter()
+                .zip(encryption_randomizations.iter())
+                .enumerate()
+            {
+                tracing::info!(
+                    target: LOG_TARGET,
+                    "Rerandomizing card {} of {}",
+                    i + 1,
+                    input_deck.len()
+                );
 
-        for (i, (card, encryption_randomization)) in input_deck
-            .iter()
-            .zip(encryption_randomizations.iter())
-            .enumerate()
-        {
-            tracing::info!(
-                target: LOG_TARGET,
-                "Rerandomizing card {} of {}",
-                i + 1,
-                input_deck.len()
-            );
+                // Apply rerandomization to the ciphertext
+                let rerandomized_card = Self::rerandomize_ciphertext(
+                    cs.clone(),
+                    card,
+                    encryption_randomization,
+                    shuffler_pk,
+                )?;
 
-            // Apply rerandomization to the ciphertext
-            let rerandomized_card = Self::rerandomize_ciphertext(
-                cs.cs(),
-                card,
-                encryption_randomization,
-                shuffler_pk,
-            )?;
+                output_deck.push(rerandomized_card);
+            }
 
-            output_deck.push(rerandomized_card);
-        }
-
-        Ok(output_deck)
+            Ok(output_deck)
+        })
     }
 
     /// Verify that a deck has been correctly re-randomized

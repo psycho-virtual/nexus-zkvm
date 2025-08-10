@@ -54,6 +54,49 @@ where
     )
 }
 
+/// Apply RS shuffle permutation to a collection
+///
+/// This function generates the witness data for RS shuffle and applies the resulting
+/// permutation to the input collection.
+///
+/// # Parameters
+/// - `seed`: The seed for deterministic permutation generation
+/// - `input`: The input array to be permuted
+///
+/// # Returns
+/// A tuple containing:
+/// - The witness data for the shuffle
+/// - The number of samples used in bit generation
+/// - The permuted array
+pub fn apply_rs_shuffle_permutation<F, T>(
+    seed: F,
+    input: &[T; N],
+) -> (WitnessData<N, LEVELS>, usize, [T; N])
+where
+    F: Field + PrimeField + Absorb,
+    T: Clone + std::fmt::Debug,
+{
+    // Generate witness data - we need to specify the const generics
+    let (witness_data, num_samples) = prepare_witness_data::<F>(seed);
+
+    // Extract final permutation from last level
+    let final_sorted = &witness_data.next_levels[LEVELS - 1];
+
+    // Apply permutation to create output array
+    // For each position in the output, get the element from the original index
+    let output: Vec<T> = final_sorted
+        .iter()
+        .map(|sorted_row| input[sorted_row.idx as usize].clone())
+        .collect();
+
+    // Convert Vec to array
+    let output_array: [T; N] = output
+        .try_into()
+        .expect("Permutation should preserve array size");
+
+    (witness_data, num_samples, output_array)
+}
+
 /// Build witness tables for one level using functional approach
 pub fn build_level<const N: usize>(
     prev_rows: &[SortedRow; N],
