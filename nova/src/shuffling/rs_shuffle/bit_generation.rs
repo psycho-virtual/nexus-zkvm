@@ -14,7 +14,7 @@ use ark_ff::{Field, PrimeField};
 use ark_r1cs_std::{boolean::Boolean, fields::fp::FpVar, prelude::*};
 use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
 
-const LOG_TARGET: &str = "rs-shuffle::bit_generation";
+const LOG_TARGET: &str = "nexus_nova::shuffling::rs_shuffle::bit_generation";
 
 /// Derive split bits from random seed using Poseidon hash
 ///
@@ -406,11 +406,6 @@ mod tests {
         let constraint_count = final_constraints - initial_constraints;
 
         // Log the constraint count for information
-        println!(
-            "Bit generation circuit uses {} constraints",
-            constraint_count
-        );
-
         // The circuit should generate a reasonable number of constraints
         // Mainly from Poseidon hash and bit decomposition
         assert!(constraint_count > 0, "Should generate some constraints");

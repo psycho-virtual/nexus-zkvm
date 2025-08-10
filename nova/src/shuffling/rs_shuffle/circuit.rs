@@ -21,7 +21,7 @@ use ark_r1cs_std::{
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
 use std::ops::Not;
 
-const LOG_TARGET: &str = "rs_shuffle::circuit";
+const LOG_TARGET: &str = "nexus_nova::shuffling::rs_shuffle::circuit";
 
 /// Verify RS shuffle constraints in a SNARK circuit
 ///
@@ -658,14 +658,10 @@ mod tests {
         filter, fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt,
     };
 
-    const TEST_TARGET: &str = "rs_shuffle::tests";
-    const LOG_TARGET: &str = "rs_shuffle::circuit";
+    const TEST_TARGET: &str = "nexus_nova";
 
     fn setup_test_tracing() -> tracing::subscriber::DefaultGuard {
-        let filter = filter::Targets::new()
-            .with_target(TEST_TARGET, tracing::Level::DEBUG)
-            .with_target(LOG_TARGET, tracing::Level::DEBUG)
-            .with_target("shuffle", tracing::Level::DEBUG);
+        let filter = filter::Targets::new().with_target(TEST_TARGET, tracing::Level::DEBUG);
 
         tracing_subscriber::registry()
             .with(

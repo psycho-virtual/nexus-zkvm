@@ -1,14 +1,16 @@
 //! Grand-product permutation checks for RS shuffle
 
+use crate::shuffling::data_structures::ElGamalCiphertextVar;
 use ark_ec::short_weierstrass::SWCurveConfig;
 use ark_ff::PrimeField;
 use ark_r1cs_std::{
     eq::EqGadget,
     fields::{fp::FpVar, FieldVar},
+    R1CSVar,
 };
 use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
 
-use crate::shuffling::data_structures::ElGamalCiphertextVar;
+const LOG_TARGET: &str = "nexus_nova::shuffling::rs_shuffle::permutation";
 
 /// Trait for types that can be compressed into a field element for permutation products
 /// The generic parameter N represents the number of challenges needed
@@ -71,9 +73,10 @@ where
     // Enforce equality using FpVar's enforce_equal
     // Debug trace the products before equality check
     tracing::debug!(
+        target: LOG_TARGET,
         "Left product: {:?}, Right product: {:?}",
-        prod_left,
-        prod_right
+        prod_left.value(),
+        prod_right.value()
     );
     prod_left.enforce_equal(&prod_right)?;
 
