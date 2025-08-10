@@ -159,10 +159,7 @@ where
     G::BaseField: PrimeField,
 {
     fn clone(&self) -> Self {
-        Self {
-            c1: self.c1.clone(),
-            c2: self.c2.clone(),
-        }
+        Self { c1: self.c1.clone(), c2: self.c2.clone() }
     }
 }
 
@@ -241,7 +238,7 @@ where
     pub input_deck: Vec<ElGamalCiphertextVar<G>>,
     /// Sorted list of (encrypted card, random value) pairs, sorted by random value in ascending order
     pub sorted_deck: Vec<(ElGamalCiphertextVar<G>, FpVar<G::BaseField>)>,
-    pub rerandomization_values: Vec<FpVar<G::BaseField>>,
+    pub encryption_randomization_values: Vec<FpVar<G::BaseField>>,
 }
 
 impl<G: SWCurveConfig> AllocVar<ShuffleProof<Projective<G>>, G::BaseField> for ShuffleProofVar<G>
@@ -303,7 +300,7 @@ where
         Ok(Self {
             input_deck,
             sorted_deck,
-            rerandomization_values: rerandomization_values?,
+            encryption_randomization_values: rerandomization_values?,
         })
     }
 }

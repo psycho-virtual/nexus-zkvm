@@ -51,12 +51,12 @@ where
         skip_all,
         fields(deck_size = tracing::field::Empty)
     )]
-    fn generate_random_values_for_deck<'a>(
+    fn generate_random_values_for_deck(
         &self,
         cs: ConstraintSystemRef<G::BaseField>,
         seed: &FpVar<G::BaseField>,
-        deck: &'a Vec<ElGamalCiphertextVar<G>>,
-    ) -> Result<Vec<(&'a ElGamalCiphertextVar<G>, FpVar<G::BaseField>)>, SynthesisError>
+        deck_size: usize,
+    ) -> Result<Vec<FpVar<G::BaseField>>, SynthesisError>
     where
         G::BaseField: PrimeField + Absorb + Copy,
     {
@@ -71,15 +71,14 @@ where
             sponge.absorb(&seed)?;
 
             // Generate random value for each card
-            let deck_len = deck.len();
             tracing::debug!(
                 target: LOG_TARGET,
                 "Generating random values for {} cards",
-                deck_len
+                deck_size
             );
 
             // Squeeze all random values at once - much more efficient
-            let random_values: Result<Vec<_>, _> = (0..deck_len)
+            let random_values: Result<Vec<_>, _> = (0..deck_size)
                 .map(|_| sponge.squeeze_field_elements(1).map(|vals| vals[0].clone()))
                 .collect();
             let random_values = random_values?;
@@ -87,68 +86,18 @@ where
             // Safety check: ensure we got exactly the right number of random values
             assert_eq!(
                 random_values.len(),
-                deck_len,
+                deck_size,
                 "Squeeze operation should return exactly {} random values, got {}",
-                deck_len,
+                deck_size,
                 random_values.len()
             );
 
-            // Pair each card with its random value
-            let deck_with_randoms = deck
-                .iter()
-                .zip(random_values.into_iter())
-                .collect::<Vec<_>>();
-
             tracing::debug!(target: LOG_TARGET, "All random values generated");
 
-            Ok(deck_with_randoms)
+            Ok(random_values)
         })
     }
 
-    #[tracing::instrument(target = LOG_TARGET, skip_all)]
-    fn reencrypt_cards_with_new_randomization(
-        &self,
-        cs: ConstraintSystemRef<G::BaseField>,
-        input_deck: Vec<(&ElGamalCiphertextVar<G>, FpVar<G::BaseField>)>,
-        rerandomizations: &Vec<FpVar<G::BaseField>>,
-        shuffler_pk: &ProjectiveVar<G, FpVar<G::BaseField>>,
-    ) -> Result<Vec<(ElGamalCiphertextVar<G>, FpVar<G::BaseField>)>, SynthesisError>
-    where
-        G::BaseField: PrimeField,
-    {
-        let cs = ns!(cs, "reencrypt_cards_with_new_randomization");
-
-        if input_deck.len() != rerandomizations.len() {
-            return Err(SynthesisError::Unsatisfiable);
-        }
-
-        let mut output_deck = Vec::with_capacity(input_deck.len());
-
-        for (i, ((card, random_value), rerandomization)) in
-            input_deck.iter().zip(rerandomizations.iter()).enumerate()
-        {
-            tracing::info!(
-                target: LOG_TARGET,
-                "Rerandomizing card {} of {}",
-                i + 1,
-                input_deck.len()
-            );
-
-            // Apply rerandomization to the ciphertext
-            let rerandomized_card =
-                super::encryption::ElGamalEncryption::<G>::rerandomize_ciphertext(
-                    cs.cs(),
-                    card,
-                    rerandomization,
-                    shuffler_pk,
-                )?;
-
-            // Keep the same random value associated with the card
-            output_deck.push((rerandomized_card, random_value.clone()));
-        }
-
-        Ok(output_deck)
-    }
 
     /// Compute the grand product for a deck of cards
     fn compute_deck_product<'a, I>(
@@ -216,7 +165,7 @@ where
         if let Ok(product_val) = product.value() {
             tracing::info!(target: LOG_TARGET, "Computed product for randomized deck: {:?}", product_val);
         }
-        
+
         // Compute product for sorted deck
         let sorted_product = self.compute_deck_product(
             cs.clone(),
@@ -230,7 +179,8 @@ where
         }
 
         // Check if products are equal before enforcing (only if values are available)
-        if let (Ok(product_val), Ok(sorted_product_val)) = (product.value(), sorted_product.value()) {
+        if let (Ok(product_val), Ok(sorted_product_val)) = (product.value(), sorted_product.value())
+        {
             if product_val != sorted_product_val {
                 tracing::error!(
                     target: LOG_TARGET,
@@ -364,18 +314,28 @@ where
 
         // Generate random values for each card using Poseidon
         tracing::info!(target = LOG_TARGET, "Generating random values for deck...");
-        let input_deck_with_randoms =
-            self.generate_random_values_for_deck(cs.clone(), &seed_var, &proof_var.input_deck)?;
-
-        // Apply re-randomization to create the new deck with associated random values
-        let deck_with_rerandomizations = self.reencrypt_cards_with_new_randomization(
+        let random_values = self.generate_random_values_for_deck(
             cs.clone(),
-            input_deck_with_randoms,
-            &proof_var.rerandomization_values,
+            &seed_var,
+            proof_var.input_deck.len(),
+        )?;
+
+        // Apply re-randomization to create the new deck
+        let rerandomized_deck = super::encryption::ElGamalEncryption::<G>::reencrypt_cards_with_new_randomization(
+            cs.clone(),
+            &proof_var.input_deck,
+            &proof_var.encryption_randomization_values,
             &shuffler_pk_var,
         )?;
 
         tracing::info!(target: LOG_TARGET, "Finish rerandomizing cards");
+
+        // Pair rerandomized cards with random values for grand product
+        let deck_with_rerandomizations: Vec<(ElGamalCiphertextVar<G>, FpVar<G::BaseField>)> =
+            rerandomized_deck
+                .into_iter()
+                .zip(random_values.iter().cloned())
+                .collect();
 
         // Generate challenges for grand product
         let alpha = FpVar::new_witness(cs.clone(), || Ok(G::BaseField::from(7u64)))?; // In practice, from Fiat-Shamir

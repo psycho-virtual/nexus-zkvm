@@ -121,6 +121,52 @@ where
         })
     }
 
+    /// Re-encrypt a deck of cards with new randomization values
+    /// This function applies re-randomization to each card in the input deck
+    #[tracing::instrument(target = LOG_TARGET, skip_all)]
+    pub fn reencrypt_cards_with_new_randomization(
+        cs: ConstraintSystemRef<G::BaseField>,
+        input_deck: &Vec<ElGamalCiphertextVar<G>>,
+        encryption_randomizations: &Vec<FpVar<G::BaseField>>,
+        shuffler_pk: &ProjectiveVar<G, FpVar<G::BaseField>>,
+    ) -> Result<Vec<ElGamalCiphertextVar<G>>, SynthesisError>
+    where
+        G::BaseField: PrimeField,
+    {
+        let cs = ns!(cs, "reencrypt_cards_with_new_randomization");
+
+        if input_deck.len() != encryption_randomizations.len() {
+            return Err(SynthesisError::Unsatisfiable);
+        }
+
+        let mut output_deck = Vec::with_capacity(input_deck.len());
+
+        for (i, (card, encryption_randomization)) in input_deck
+            .iter()
+            .zip(encryption_randomizations.iter())
+            .enumerate()
+        {
+            tracing::info!(
+                target: LOG_TARGET,
+                "Rerandomizing card {} of {}",
+                i + 1,
+                input_deck.len()
+            );
+
+            // Apply rerandomization to the ciphertext
+            let rerandomized_card = Self::rerandomize_ciphertext(
+                cs.cs(),
+                card,
+                encryption_randomization,
+                shuffler_pk,
+            )?;
+
+            output_deck.push(rerandomized_card);
+        }
+
+        Ok(output_deck)
+    }
+
     /// Verify that a deck has been correctly re-randomized
     #[tracing::instrument(target = LOG_TARGET, name = "verify_rerandomization", skip_all)]
     pub fn verify_rerandomization(

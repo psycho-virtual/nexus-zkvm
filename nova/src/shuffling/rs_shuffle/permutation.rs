@@ -69,6 +69,12 @@ where
     }
 
     // Enforce equality using FpVar's enforce_equal
+    // Debug trace the products before equality check
+    tracing::debug!(
+        "Left product: {:?}, Right product: {:?}",
+        prod_left,
+        prod_right
+    );
     prod_left.enforce_equal(&prod_right)?;
 
     Ok(())
