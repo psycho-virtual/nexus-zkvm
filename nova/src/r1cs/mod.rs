@@ -3,7 +3,7 @@ use ark_std::fmt;
 use ark_crypto_primitives::sponge::Absorb;
 use ark_ec::{AdditiveGroup, CurveGroup};
 use ark_ff::{Field, PrimeField};
-use ark_relations::r1cs::ConstraintSystemRef;
+use ark_relations::gr1cs::{ConstraintSystemRef, R1CS_PREDICATE_LABEL};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::fmt::Display;
 
@@ -16,7 +16,7 @@ use super::{absorb::AbsorbEmulatedFp, commitment::CommitmentScheme};
 
 pub use super::sparse::{MatrixRef, SparseMatrix};
 
-pub use ark_relations::r1cs::Matrix;
+pub use ark_relations::gr1cs::Matrix;
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum Error {
@@ -195,15 +195,17 @@ impl<G: CurveGroup> From<ConstraintSystemRef<G::ScalarField>> for R1CSShape<G> {
         let num_vars = cs.num_witness_variables();
         let num_io = cs.num_instance_variables();
 
+        let r1cs_matrices = &matrices[R1CS_PREDICATE_LABEL];
+
         let rows = num_constraints;
         let columns = num_io + num_vars;
         Self {
             num_constraints,
             num_vars,
             num_io,
-            A: SparseMatrix::new(&matrices.a, rows, columns),
-            B: SparseMatrix::new(&matrices.b, rows, columns),
-            C: SparseMatrix::new(&matrices.c, rows, columns),
+            A: SparseMatrix::new(&r1cs_matrices[0], rows, columns),
+            B: SparseMatrix::new(&r1cs_matrices[1], rows, columns),
+            C: SparseMatrix::new(&r1cs_matrices[2], rows, columns),
         }
     }
 }
@@ -622,7 +624,7 @@ pub(crate) mod tests {
     use crate::pedersen::PedersenCommitment;
 
     use ark_ff::Field;
-    use ark_relations::r1cs::Matrix;
+    use ark_relations::gr1cs::Matrix;
     use ark_test_curves::bls12_381::{Fr as Scalar, G1Projective as G};
 
     pub(crate) fn to_field_sparse<G: CurveGroup>(matrix: &[&[u64]]) -> Matrix<G::ScalarField> {

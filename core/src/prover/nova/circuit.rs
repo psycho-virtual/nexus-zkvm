@@ -5,11 +5,11 @@ pub use ark_r1cs_std::{
         fp::{AllocatedFp, FpVar},
         FieldVar,
     },
-    R1CSVar,
+    GR1CSVar,
 };
 pub use ark_relations::{
     lc,
-    r1cs::{SynthesisError, SynthesisMode, Variable},
+    gr1cs::{SynthesisError, SynthesisMode, Variable},
 };
 
 use nexus_vm::{

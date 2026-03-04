@@ -13,7 +13,7 @@ use ark_r1cs_std::{
     fields::fp::FpVar,
     groups::{curves::short_weierstrass::ProjectiveVar, CurveVar},
 };
-use ark_relations::r1cs::{
+use ark_relations::gr1cs::{
     ConstraintSynthesizer, ConstraintSystem, ConstraintSystemRef, SynthesisError, SynthesisMode,
 };
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
@@ -105,15 +105,15 @@ where
     C2: CommitmentScheme<Projective<G2>>,
 {
     let cs = ConstraintSystem::<G1::BaseField>::new_ref();
-    cs.set_mode(SynthesisMode::Prove { construct_matrices: false });
+    cs.set_mode(SynthesisMode::Prove { construct_matrices: false, generate_lc_assignments: true });
 
     circuit.generate_constraints(cs.clone())?;
 
     cs.finalize();
     let cs_borrow = cs.borrow().unwrap();
 
-    let witness = cs_borrow.witness_assignment.clone();
-    let pub_io = cs_borrow.instance_assignment.clone();
+    let witness = cs_borrow.witness_assignment().unwrap().to_vec();
+    let pub_io = cs_borrow.instance_assignment().unwrap().to_vec();
 
     let W = R1CSWitness::<G2> { W: witness };
 

@@ -6,8 +6,8 @@ use ark_crypto_primitives::sponge::{
 };
 use ark_ec::short_weierstrass::{Projective, SWCurveConfig};
 use ark_ff::{AdditiveGroup, PrimeField};
-use ark_r1cs_std::R1CSVar;
-use ark_relations::r1cs::{ConstraintSystem, SynthesisMode};
+use ark_r1cs_std::GR1CSVar;
+use ark_relations::gr1cs::{ConstraintSystem, SynthesisMode};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
 use crate::{
@@ -297,7 +297,7 @@ where
         };
 
         let cs = ConstraintSystem::new_ref();
-        cs.set_mode(SynthesisMode::Prove { construct_matrices: false });
+        cs.set_mode(SynthesisMode::Prove { construct_matrices: false, generate_lc_assignments: true });
 
         let circuit = NovaAugmentedCircuit::new(&params.ro_config, step_circuit, input);
 
@@ -305,15 +305,15 @@ where
             .in_scope(|| NovaConstraintSynthesizer::generate_constraints(circuit, cs.clone()))?;
 
         let cs_borrow = cs.borrow().unwrap();
-        let witness = cs_borrow.witness_assignment.clone();
-        let pub_io = cs_borrow.instance_assignment.clone();
+        let witness = cs_borrow.witness_assignment().unwrap().to_vec();
+        let pub_io = cs_borrow.instance_assignment().unwrap().to_vec();
 
         let w = R1CSWitness::<G1> { W: witness };
 
         let commitment_W = w.commit::<C1>(&params.pp);
         let u = R1CSInstance::<G1, C1> { commitment_W, X: pub_io };
 
-        let z_i = z_i.iter().map(R1CSVar::value).collect::<Result<_, _>>()?;
+        let z_i = z_i.iter().map(GR1CSVar::value).collect::<Result<_, _>>()?;
 
         Ok(Self {
             z_0,
@@ -406,7 +406,7 @@ pub(crate) mod tests {
     use ark_crypto_primitives::sponge::poseidon::PoseidonSponge;
     use ark_ff::Field;
     use ark_r1cs_std::fields::{fp::FpVar, FieldVar};
-    use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
+    use ark_relations::gr1cs::{ConstraintSystemRef, SynthesisError};
 
     use tracing_subscriber::{
         filter, fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt,

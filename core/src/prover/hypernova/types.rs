@@ -5,7 +5,7 @@ pub use ark_grumpkin::{Affine as A2, Fr as F2, GrumpkinConfig as G2, Projective 
 // concrete sponge used
 pub use ark_crypto_primitives::sponge::poseidon::{PoseidonConfig, PoseidonSponge};
 
-pub use ark_relations::r1cs::ConstraintSystemRef;
+pub use ark_relations::gr1cs::ConstraintSystemRef;
 
 pub use spartan::polycommitments::{zeromorph::Zeromorph, PolyCommitmentScheme};
 

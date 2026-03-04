@@ -6,7 +6,7 @@ use ark_r1cs_std::{
 };
 use ark_relations::{
     lc,
-    r1cs::{ConstraintSystemRef, SynthesisError, Variable},
+    gr1cs::{ConstraintSystemRef, SynthesisError, Variable},
 };
 
 use crate::{
@@ -89,7 +89,7 @@ fn build_constraints_partial(
     };
 
     for i in 0..rcs.a.len() {
-        cs.enforce_constraint(row(&rcs.a[i]), row(&rcs.b[i]), row(&rcs.c[i]))?;
+        cs.enforce_r1cs_constraint(|| row(&rcs.a[i]), || row(&rcs.b[i]), || row(&rcs.c[i]))?;
     }
 
     Ok(output)

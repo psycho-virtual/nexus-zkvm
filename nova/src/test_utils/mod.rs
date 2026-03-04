@@ -5,9 +5,9 @@ use ark_ff::PrimeField;
 use ark_r1cs_std::{
     fields::{fp::FpVar, FieldVar},
     prelude::{AllocVar, EqGadget},
-    R1CSVar,
+    GR1CSVar,
 };
-use ark_relations::r1cs::{
+use ark_relations::gr1cs::{
     ConstraintSynthesizer, ConstraintSystem, ConstraintSystemRef, SynthesisError, SynthesisMode,
 };
 use ark_spartan::polycommitments::{PCSKeys, PolyCommitmentScheme};
@@ -62,7 +62,7 @@ where
     let circuit = CubicCircuit { x };
 
     let cs = ConstraintSystem::<G::ScalarField>::new_ref();
-    cs.set_mode(SynthesisMode::Prove { construct_matrices: true });
+    cs.set_mode(SynthesisMode::Prove { construct_matrices: true, generate_lc_assignments: true });
 
     circuit.generate_constraints(cs.clone()).unwrap();
     assert!(cs.is_satisfied().unwrap());
@@ -71,11 +71,11 @@ where
     let shape = R1CSShape::<Projective<G>>::from(cs.clone());
 
     let cs_borrow = cs.borrow().unwrap();
-    let W = cs_borrow.witness_assignment.clone();
-    let X = cs_borrow.instance_assignment.clone();
+    let W = cs_borrow.witness_assignment().unwrap().to_vec();
+    let X = cs_borrow.instance_assignment().unwrap().to_vec();
     let pp = pp.cloned().unwrap_or_else(|| {
         C::setup(
-            cs_borrow.num_witness_variables + cs_borrow.num_constraints,
+            cs_borrow.num_witness_variables() + cs_borrow.num_constraints(),
             b"test",
             aux,
         )
@@ -108,7 +108,7 @@ where
     let circuit = CubicCircuit { x };
 
     let cs = ConstraintSystem::<G::ScalarField>::new_ref();
-    cs.set_mode(SynthesisMode::Prove { construct_matrices: true });
+    cs.set_mode(SynthesisMode::Prove { construct_matrices: true, generate_lc_assignments: true });
 
     circuit.generate_constraints(cs.clone()).unwrap();
     assert!(cs.is_satisfied().unwrap());
@@ -117,8 +117,8 @@ where
     let shape = CCSShape::from(R1CSShape::<Projective<G>>::from(cs.clone()));
 
     let cs_borrow = cs.borrow().unwrap();
-    let W = cs_borrow.witness_assignment.clone();
-    let X = cs_borrow.instance_assignment.clone();
+    let W = cs_borrow.witness_assignment().unwrap().to_vec();
+    let X = cs_borrow.instance_assignment().unwrap().to_vec();
 
     let num_vars = (W.len() + X.len()).next_power_of_two();
     let ck = ck.cloned().unwrap_or_else(|| {

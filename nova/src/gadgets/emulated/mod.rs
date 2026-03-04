@@ -10,7 +10,7 @@ use ark_r1cs_std::{
         fp::FpVar,
     },
 };
-use ark_relations::r1cs::{ConstraintSystemRef, Namespace, OptimizationGoal, SynthesisError};
+use ark_relations::gr1cs::{ConstraintSystemRef, Namespace, OptimizationGoal, SynthesisError};
 
 pub mod short_weierstrass;
 

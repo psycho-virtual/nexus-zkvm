@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fmt::{self, Debug, Display, Formatter};
 
-pub use ark_relations::r1cs::SynthesisError;
+pub use ark_relations::gr1cs::SynthesisError;
 pub use ark_serialize::SerializationError;
 pub use nexus_nova::ccs::Error as CCSError;
 pub use nexus_nova::hypernova::{Error as HyperNovaError, HNFoldingError};

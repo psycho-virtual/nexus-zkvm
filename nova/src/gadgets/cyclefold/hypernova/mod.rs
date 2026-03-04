@@ -16,9 +16,9 @@ use ark_r1cs_std::{
     boolean::Boolean,
     eq::EqGadget,
     fields::{fp::FpVar, FieldVar},
-    R1CSVar,
+    GR1CSVar,
 };
-use ark_relations::r1cs::SynthesisError;
+use ark_relations::gr1cs::SynthesisError;
 use ark_spartan::polycommitments::PolyCommitmentScheme;
 use ark_std::ops::Neg;
 
@@ -275,8 +275,8 @@ mod tests {
     use ark_crypto_primitives::sponge::{poseidon::PoseidonSponge, Absorb};
     use ark_ec::short_weierstrass::{Projective, SWCurveConfig};
     use ark_ff::Field;
-    use ark_r1cs_std::{fields::fp::FpVar, prelude::AllocVar, R1CSVar};
-    use ark_relations::r1cs::ConstraintSystem;
+    use ark_r1cs_std::{fields::fp::FpVar, prelude::AllocVar, GR1CSVar};
+    use ark_relations::gr1cs::ConstraintSystem;
     use ark_std::{test_rng, UniformRand};
 
     use rayon::iter::{IntoParallelRefIterator, ParallelIterator};

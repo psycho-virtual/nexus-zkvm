@@ -1,5 +1,5 @@
 use ark_r1cs_std::{alloc::AllocVar, fields::fp::FpVar};
-use ark_relations::r1cs::ConstraintSystem;
+use ark_relations::gr1cs::ConstraintSystem;
 
 use crate::{
     error::Result,

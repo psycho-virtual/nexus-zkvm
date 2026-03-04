@@ -13,11 +13,11 @@ use ark_r1cs_std::{
     eq::EqGadget,
     fields::{fp::FpVar, FieldVar},
     select::CondSelectGadget,
-    R1CSVar,
+    GR1CSVar,
 };
 use ark_relations::{
     lc,
-    r1cs::{ConstraintSystemRef, LinearCombination, Namespace, SynthesisError, Variable},
+    gr1cs::{ConstraintSystemRef, LinearCombination, Namespace, SynthesisError, Variable},
 };
 use ark_std::Zero;
 
@@ -319,7 +319,7 @@ impl<F: PrimeField> SelectorBits<F> {
         let selected_sum = bits
             .iter()
             .fold(LinearCombination::zero(), |lc, bit| lc + bit.lc());
-        cs.enforce_constraint(selected_sum, lc!() + Variable::One, lc!() + Variable::One)?;
+        cs.enforce_r1cs_constraint(|| selected_sum, || lc!() + Variable::One, || lc!() + Variable::One)?;
 
         let mut selected_value = FpVar::<F>::zero();
         // can be optimized to avoid creating new lc on each iteration
@@ -492,10 +492,10 @@ where
         };
         let hash_input = cs.new_input_variable(|| hash.value())?;
 
-        cs.enforce_constraint(
-            lc!() + hash_input,
-            lc!() + Variable::One,
-            lc!() + allocated_hash.variable,
+        cs.enforce_r1cs_constraint(
+            || lc!() + hash_input,
+            || lc!() + Variable::One,
+            || lc!() + allocated_hash.variable,
         )?;
 
         Ok((pc_next, z_next))
@@ -507,7 +507,7 @@ mod tests {
     use super::*;
     use crate::{pedersen::PedersenCommitment, poseidon_config};
     use ark_crypto_primitives::sponge::poseidon::PoseidonSponge;
-    use ark_relations::r1cs::ConstraintSystem;
+    use ark_relations::gr1cs::ConstraintSystem;
 
     struct TestCircuit;
 

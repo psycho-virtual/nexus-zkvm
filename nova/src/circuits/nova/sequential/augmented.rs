@@ -11,11 +11,11 @@ use ark_r1cs_std::{
     alloc::{AllocVar, AllocationMode},
     eq::EqGadget,
     fields::{fp::FpVar, FieldVar},
-    R1CSVar,
+    GR1CSVar,
 };
 use ark_relations::{
     lc,
-    r1cs::{ConstraintSystemRef, Namespace, SynthesisError, Variable},
+    gr1cs::{ConstraintSystemRef, Namespace, SynthesisError, Variable},
 };
 use ark_std::Zero;
 
@@ -345,10 +345,10 @@ where
         };
         let hash_input = cs.new_input_variable(|| hash.value())?;
 
-        cs.enforce_constraint(
-            lc!() + hash_input,
-            lc!() + Variable::One,
-            lc!() + allocated_hash.variable,
+        cs.enforce_r1cs_constraint(
+            || lc!() + hash_input,
+            || lc!() + Variable::One,
+            || lc!() + allocated_hash.variable,
         )?;
 
         Ok(z_next)
@@ -360,7 +360,7 @@ mod tests {
     use super::*;
     use crate::{pedersen::PedersenCommitment, poseidon_config};
     use ark_crypto_primitives::sponge::poseidon::PoseidonSponge;
-    use ark_relations::r1cs::ConstraintSystem;
+    use ark_relations::gr1cs::ConstraintSystem;
 
     struct TestCircuit;
 

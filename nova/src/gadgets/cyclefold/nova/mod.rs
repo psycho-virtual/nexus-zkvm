@@ -9,9 +9,9 @@ use ark_r1cs_std::{
     eq::EqGadget,
     fields::{fp::FpVar, FieldVar},
     groups::curves::short_weierstrass::ProjectiveVar,
-    R1CSVar,
+    GR1CSVar,
 };
-use ark_relations::r1cs::SynthesisError;
+use ark_relations::gr1cs::SynthesisError;
 
 pub(crate) mod primary;
 
@@ -343,8 +343,8 @@ mod tests {
     use ark_crypto_primitives::sponge::{poseidon::PoseidonSponge, Absorb};
 
     use ark_ff::Field;
-    use ark_r1cs_std::{fields::fp::FpVar, prelude::AllocVar, R1CSVar};
-    use ark_relations::r1cs::ConstraintSystem;
+    use ark_r1cs_std::{fields::fp::FpVar, prelude::AllocVar, GR1CSVar};
+    use ark_relations::gr1cs::ConstraintSystem;
 
     #[test]
     fn verify_in_circuit() {

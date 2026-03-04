@@ -21,7 +21,7 @@ pub enum Error {
     R1CS(R1CSError),
     CCS(CCSError),
     HNFolding(HNFoldingError),
-    Synthesis(ark_relations::r1cs::SynthesisError),
+    Synthesis(ark_relations::gr1cs::SynthesisError),
 
     InvalidPublicInput,
     PolyCommitmentSetup,
@@ -45,8 +45,8 @@ impl From<HNFoldingError> for Error {
     }
 }
 
-impl From<ark_relations::r1cs::SynthesisError> for Error {
-    fn from(error: ark_relations::r1cs::SynthesisError) -> Self {
+impl From<ark_relations::gr1cs::SynthesisError> for Error {
+    fn from(error: ark_relations::gr1cs::SynthesisError) -> Self {
         Self::Synthesis(error)
     }
 }

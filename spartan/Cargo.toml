@@ -37,9 +37,7 @@ ark-poly-commit.workspace = true
 ark-std.workspace = true
 ark-serialize.workspace = true
 
-ark-bls12-381 = { version = "^0.5.0", default-features = false, features = [
-    "curve",
-] }
+ark-bls12-381.workspace = true
 derivative = "2.2.0"
 
 [dev-dependencies]

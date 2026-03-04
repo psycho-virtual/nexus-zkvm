@@ -5,7 +5,7 @@ use ark_crypto_primitives::sponge::{
 use ark_ec::short_weierstrass::{Projective, SWCurveConfig};
 use ark_ff::PrimeField;
 use ark_r1cs_std::fields::fp::FpVar;
-use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
+use ark_relations::gr1cs::{ConstraintSystemRef, SynthesisError};
 use ark_spartan::polycommitments::PolyCommitmentScheme;
 
 pub mod sequential;

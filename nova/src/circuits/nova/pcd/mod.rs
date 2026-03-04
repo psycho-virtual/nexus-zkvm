@@ -44,8 +44,8 @@ use ark_crypto_primitives::sponge::{
 };
 use ark_ec::short_weierstrass::{Projective, SWCurveConfig};
 use ark_ff::{AdditiveGroup, PrimeField};
-use ark_r1cs_std::R1CSVar;
-use ark_relations::r1cs::{ConstraintSystem, SynthesisMode};
+use ark_r1cs_std::GR1CSVar;
+use ark_relations::gr1cs::{ConstraintSystem, SynthesisMode};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
 use super::{public_params, NovaConstraintSynthesizer, StepCircuit};
@@ -247,15 +247,15 @@ where
         };
 
         let cs = ConstraintSystem::new_ref();
-        cs.set_mode(SynthesisMode::Prove { construct_matrices: false });
+        cs.set_mode(SynthesisMode::Prove { construct_matrices: false, generate_lc_assignments: true });
 
         let circuit = NovaAugmentedCircuit::new(&params.ro_config, step_circuit, input);
         let z_next = tracing::debug_span!(target: LOG_TARGET, "satisfying_assignment")
             .in_scope(|| NovaConstraintSynthesizer::generate_constraints(circuit, cs.clone()))?;
 
         let cs_borrow = cs.borrow().unwrap();
-        let witness = cs_borrow.witness_assignment.clone();
-        let pub_io = cs_borrow.instance_assignment.clone();
+        let witness = cs_borrow.witness_assignment().unwrap().to_vec();
+        let pub_io = cs_borrow.instance_assignment().unwrap().to_vec();
 
         let w = R1CSWitness::<G1> { W: witness };
 
@@ -263,7 +263,7 @@ where
         let u = R1CSInstance::<G1, C1> { commitment_W, X: pub_io };
         let z_j = z_next
             .iter()
-            .map(R1CSVar::value)
+            .map(GR1CSVar::value)
             .collect::<Result<_, _>>()?;
 
         Ok(Self {
@@ -373,7 +373,7 @@ where
         };
 
         let cs = ConstraintSystem::new_ref();
-        cs.set_mode(SynthesisMode::Prove { construct_matrices: false });
+        cs.set_mode(SynthesisMode::Prove { construct_matrices: false, generate_lc_assignments: true });
 
         let circuit = NovaAugmentedCircuit::new(
             &params.ro_config,
@@ -384,8 +384,8 @@ where
             .in_scope(|| NovaConstraintSynthesizer::generate_constraints(circuit, cs.clone()))?;
 
         let cs_borrow = cs.borrow().unwrap();
-        let witness = cs_borrow.witness_assignment.clone();
-        let pub_io = cs_borrow.instance_assignment.clone();
+        let witness = cs_borrow.witness_assignment().unwrap().to_vec();
+        let pub_io = cs_borrow.instance_assignment().unwrap().to_vec();
 
         let w = R1CSWitness::<G1> { W: witness };
 

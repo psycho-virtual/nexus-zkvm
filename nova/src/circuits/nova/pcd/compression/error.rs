@@ -1,4 +1,4 @@
-use ark_relations::r1cs::SynthesisError;
+use ark_relations::gr1cs::SynthesisError;
 use ark_spartan::errors::ProofVerifyError;
 use ark_std::{error::Error, fmt::Display};
 

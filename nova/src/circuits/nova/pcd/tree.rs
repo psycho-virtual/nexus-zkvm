@@ -248,7 +248,7 @@ mod tests {
         // Compute step function that computes f(x) = x³ - x + 5
         let compute_step = |z: &[G1::ScalarField]| {
             let x = z[0];
-            let result = x.cube() - x + G1::ScalarField::from(5);
+            let result = x * x * x - x + G1::ScalarField::from(5);
             vec![result]
         };
         
@@ -267,7 +267,7 @@ mod tests {
         // Calculate expected final state manually
         let mut state = initial_input[0];
         for _ in 0..steps {
-            state = state.cube() - state + G1::ScalarField::from(5);
+            state = state * state * state - state + G1::ScalarField::from(5);
         }
         
         // Check that the root's final state matches expected

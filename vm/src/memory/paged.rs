@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use ark_ff::AdditiveGroup;
 use ark_r1cs_std::fields::fp::FpVar;
-use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
+use ark_relations::gr1cs::{ConstraintSystemRef, SynthesisError};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
 use super::cacheline::CacheLine;

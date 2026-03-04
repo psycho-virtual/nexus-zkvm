@@ -18,9 +18,9 @@ use ark_r1cs_std::{
     groups::{curves::short_weierstrass::ProjectiveVar, CurveVar},
     select::CondSelectGadget,
     uint8::UInt8,
-    R1CSVar,
+    GR1CSVar,
 };
-use ark_relations::r1cs::{ConstraintSystemRef, Namespace, SynthesisError};
+use ark_relations::gr1cs::{ConstraintSystemRef, Namespace, SynthesisError};
 
 use crate::{
     commitment::CommitmentScheme,
@@ -91,7 +91,7 @@ where
     }
 }
 
-impl<G2, C2> R1CSVar<G2::BaseField> for R1CSInstanceVar<G2, C2>
+impl<G2, C2> GR1CSVar<G2::BaseField> for R1CSInstanceVar<G2, C2>
 where
     G2: SWCurveConfig,
     G2::BaseField: PrimeField,
@@ -222,7 +222,7 @@ where
     }
 }
 
-impl<G2, C2> R1CSVar<G2::BaseField> for RelaxedR1CSInstanceVar<G2, C2>
+impl<G2, C2> GR1CSVar<G2::BaseField> for RelaxedR1CSInstanceVar<G2, C2>
 where
     G2: SWCurveConfig,
     G2::BaseField: PrimeField,

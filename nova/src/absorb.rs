@@ -16,7 +16,7 @@
 use ark_crypto_primitives::sponge::{self as ark_sponge, Absorb};
 use ark_ec::{
     short_weierstrass::{Projective, SWCurveConfig},
-    CurveGroup,
+    AffineRepr, CurveGroup,
 };
 use ark_ff::PrimeField;
 
@@ -79,7 +79,7 @@ where
 
         let x = cast_field_element_unique::<P::BaseField, P::ScalarField>(&affine.x);
         let y = cast_field_element_unique::<P::BaseField, P::ScalarField>(&affine.y);
-        let infinity = P::ScalarField::from(affine.infinity);
+        let infinity = P::ScalarField::from(affine.is_zero());
         Absorb::to_sponge_field_elements(&[&x[..], &y[..], &[infinity]].concat(), dest);
     }
 }

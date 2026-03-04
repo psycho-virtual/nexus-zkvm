@@ -15,9 +15,9 @@ use ark_r1cs_std::{
     fields::{fp::FpVar, FieldVar},
     select::CondSelectGadget,
     uint8::UInt8,
-    R1CSVar,
+    GR1CSVar,
 };
-use ark_relations::r1cs::{ConstraintSystemRef, Namespace, SynthesisError};
+use ark_relations::gr1cs::{ConstraintSystemRef, Namespace, SynthesisError};
 use ark_spartan::polycommitments::{PolyCommitmentScheme, PolyCommitmentTrait};
 use ark_std::fmt::Debug;
 
@@ -70,7 +70,7 @@ where
     }
 }
 
-impl<G1, C1> R1CSVar<G1::ScalarField> for CCSInstanceFromR1CSVar<G1, C1>
+impl<G1, C1> GR1CSVar<G1::ScalarField> for CCSInstanceFromR1CSVar<G1, C1>
 where
     G1: SWCurveConfig,
     G1::BaseField: PrimeField,
@@ -229,7 +229,7 @@ where
     }
 }
 
-impl<G1, C1> R1CSVar<G1::ScalarField> for LCCSInstanceFromR1CSVar<G1, C1>
+impl<G1, C1> GR1CSVar<G1::ScalarField> for LCCSInstanceFromR1CSVar<G1, C1>
 where
     G1: SWCurveConfig,
     G1::BaseField: PrimeField,

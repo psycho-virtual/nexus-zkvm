@@ -9,7 +9,7 @@ use ark_crypto_primitives::{
     sponge::poseidon::{find_poseidon_ark_and_mds, PoseidonConfig},
 };
 use ark_r1cs_std::{alloc::AllocVar, boolean::Boolean, fields::fp::FpVar, prelude::*};
-use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
+use ark_relations::gr1cs::{ConstraintSystemRef, SynthesisError};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
 use crate::circuit::F;
@@ -188,7 +188,7 @@ impl MemoryProof for Path {
 pub mod test {
     use super::*;
     use ark_ff::{Field, UniformRand};
-    use ark_relations::r1cs::ConstraintSystem;
+    use ark_relations::gr1cs::ConstraintSystem;
 
     #[test]
     fn hash_sizes() {

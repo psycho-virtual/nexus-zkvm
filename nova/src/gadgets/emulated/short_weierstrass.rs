@@ -4,7 +4,7 @@ use std::ops::Not;
 use ark_crypto_primitives::sponge::constraints::AbsorbGadget;
 use ark_ec::{
     short_weierstrass::{Projective, SWCurveConfig},
-    CurveGroup,
+    AffineRepr, CurveGroup,
 };
 use ark_ff::{Field, PrimeField};
 use ark_r1cs_std::{
@@ -13,9 +13,9 @@ use ark_r1cs_std::{
     fields::{emulated_fp::EmulatedFpVar, fp::FpVar, FieldVar},
     select::CondSelectGadget,
     uint8::UInt8,
-    R1CSVar,
+    GR1CSVar,
 };
-use ark_relations::r1cs::{ConstraintSystemRef, Namespace, SynthesisError};
+use ark_relations::gr1cs::{ConstraintSystemRef, Namespace, SynthesisError};
 use ark_std::Zero;
 
 use super::cast_field_element_unique;
@@ -65,7 +65,7 @@ where
     }
 }
 
-impl<G1> R1CSVar<G1::ScalarField> for EmulatedFpAffineVar<G1>
+impl<G1> GR1CSVar<G1::ScalarField> for EmulatedFpAffineVar<G1>
 where
     G1: SWCurveConfig,
     G1::BaseField: PrimeField,
@@ -111,7 +111,7 @@ where
 
         let x = EmulatedFpVar::new_variable(cs.clone(), || Ok(affine.x), mode)?;
         let y = EmulatedFpVar::new_variable(cs.clone(), || Ok(affine.y), mode)?;
-        let infinity = Boolean::new_variable(cs.clone(), || Ok(affine.infinity), mode)?;
+        let infinity = Boolean::new_variable(cs.clone(), || Ok(affine.is_zero()), mode)?;
 
         Ok(Self { x, y, infinity })
     }

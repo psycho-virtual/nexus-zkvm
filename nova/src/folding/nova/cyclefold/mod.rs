@@ -8,7 +8,7 @@ use crate::r1cs::Error as R1CSError;
 #[derive(Debug, Clone, Copy)]
 pub enum Error {
     R1CS(R1CSError),
-    Synthesis(ark_relations::r1cs::SynthesisError),
+    Synthesis(ark_relations::gr1cs::SynthesisError),
 
     InvalidPublicInput,
 }
@@ -19,8 +19,8 @@ impl From<R1CSError> for Error {
     }
 }
 
-impl From<ark_relations::r1cs::SynthesisError> for Error {
-    fn from(error: ark_relations::r1cs::SynthesisError) -> Self {
+impl From<ark_relations::gr1cs::SynthesisError> for Error {
+    fn from(error: ark_relations::gr1cs::SynthesisError) -> Self {
         Self::Synthesis(error)
     }
 }
